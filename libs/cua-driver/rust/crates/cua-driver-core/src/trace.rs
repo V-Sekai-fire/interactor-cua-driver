@@ -6,14 +6,19 @@
 //! A span that acts on a window is also a MaskScore row: its input is the target window before the
 //! call (`source_view`), its candidate the window after it (axis `view`, kind `after_span`), and its
 //! instruction the tool and its arguments, so the `editscore_pair` view yields EditScore triples.
-//! XR Pilot's view is a streamed PyroWave frame; here it is the window as a PNG (asset kind `png`).
+//! Views are PyroWave frames (asset kind `pyrowave`), as XR Pilot keeps its streamed frames: one
+//! packet holding the whole 4:2:0 frame, which XR Pilot's decoders read unchanged. The encoder is the
+//! `cua-tracer-pyrowave` sidecar next to this executable (Metal on macOS, Vulkan elsewhere), started
+//! once per session by the writer thread. There is no PNG fallback: a view the sidecar cannot encode
+//! is not kept, and the span stays a plain span.
 //!
 //! Tracing never fails or delays the action it observes: events go to a bounded queue with
 //! `try_send`, and a writer thread owns the database. A full queue drops the event and counts it.
 //!
 //! On by default. `CUA_DRIVER_TRACE=off` turns it off; `CUA_DRIVER_TRACE=<path>` picks the file.
 //! The default file is `traces.sqlite` in the per-user data directory under `V-Sekai-fire/cua-tracer`
-//! (XR Pilot's is under `V-Sekai-fire/xr-pilot`).
+//! (XR Pilot's is under `V-Sekai-fire/xr-pilot`). `CUA_DRIVER_TRACE_BPP` sets the PyroWave budget in
+//! bits per pixel (default [`DEFAULT_BPP`]); `CUA_DRIVER_TRACE_PYROWAVE` names the sidecar.
 
 use std::{
     collections::HashMap,
@@ -33,6 +38,8 @@ use serde_json::Value;
 /// Bumped with XR Pilot's: an older store is moved aside, not altered.
 pub const SCHEMA_VERSION: i64 = 3;
 const QUEUE_CAPACITY: usize = 256;
+/// PyroWave budget for a view, bits per pixel of the even-padded frame.
+pub const DEFAULT_BPP: f64 = 1.0;
 
 /// The interned vocabularies, one relation each (XR Pilot's list).
 const VOCABULARIES: &[&str] = &[
@@ -207,7 +214,7 @@ impl TraceStore {
         let epoch = Instant::now();
         thread::Builder::new()
             .name("cua-trace-writer".into())
-            .spawn(move || Writer::new(conn, session).run(rx))?;
+            .spawn(move || Writer::new(conn, session, Box::new(Sidecar::from_env())).run(rx))?;
         Ok(Self {
             tx,
             epoch,
@@ -340,22 +347,160 @@ pub fn detail(args: &Value) -> String {
     }
 }
 
+/// Turns an even-sized RGBA8 frame into one PyroWave packet; `None` when it cannot.
+pub trait ViewEncoder: Send {
+    fn encode(&mut self, width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>>;
+}
+
+/// The `cua-tracer-pyrowave` process, started on the first view and restarted after it fails.
+pub struct Sidecar {
+    path: PathBuf,
+    bpp: f64,
+    child: Option<(std::process::Child, std::process::ChildStdin, std::process::ChildStdout)>,
+    warned: bool,
+}
+
+impl Sidecar {
+    pub fn from_env() -> Self {
+        let name = if cfg!(windows) { "cua-tracer-pyrowave.exe" } else { "cua-tracer-pyrowave" };
+        let path = std::env::var_os("CUA_DRIVER_TRACE_PYROWAVE").map(PathBuf::from).unwrap_or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| std::fs::canonicalize(p).ok())
+                .and_then(|p| p.parent().map(|d| d.join(name)))
+                .unwrap_or_else(|| PathBuf::from(name))
+        });
+        let bpp = std::env::var("CUA_DRIVER_TRACE_BPP")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(DEFAULT_BPP);
+        Self { path, bpp, child: None, warned: false }
+    }
+
+    fn start(&mut self) -> std::io::Result<()> {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(&self.path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let stdin = child.stdin.take().expect("piped");
+        let stdout = child.stdout.take().expect("piped");
+        self.child = Some((child, stdin, stdout));
+        Ok(())
+    }
+
+    fn round_trip(&mut self, width: u32, height: u32, rgba: &[u8]) -> std::io::Result<Vec<u8>> {
+        use std::io::{Read, Write};
+        if self.child.is_none() {
+            self.start()?;
+        }
+        let (_, stdin, stdout) = self.child.as_mut().expect("started");
+        let budget = ((width as f64 * height as f64 * self.bpp / 8.0) as u32).max(1);
+        let mut header = Vec::with_capacity(12);
+        for v in [width, height, budget] {
+            header.extend_from_slice(&v.to_le_bytes());
+        }
+        stdin.write_all(&header)?;
+        stdin.write_all(rgba)?;
+        stdin.flush()?;
+        let mut len = [0u8; 4];
+        stdout.read_exact(&mut len)?;
+        let mut packet = vec![0u8; u32::from_le_bytes(len) as usize];
+        stdout.read_exact(&mut packet)?;
+        Ok(packet)
+    }
+}
+
+impl ViewEncoder for Sidecar {
+    fn encode(&mut self, width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+        match self.round_trip(width, height, rgba) {
+            Ok(packet) if !packet.is_empty() => Some(packet),
+            Ok(_) => None,
+            Err(error) => {
+                if let Some((mut child, _, _)) = self.child.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                if !self.warned {
+                    self.warned = true;
+                    tracing::warn!("trace views off until the sidecar works: {}: {error}", self.path.display());
+                }
+                None
+            }
+        }
+    }
+}
+
+impl Drop for Sidecar {
+    fn drop(&mut self) {
+        if let Some((mut child, stdin, _)) = self.child.take() {
+            drop(stdin); // EOF ends the sidecar's loop
+            let _ = child.wait();
+        }
+    }
+}
+
+/// A decoded view: the frame padded to even size for 4:2:0, and the 8x8 gray grid of the original.
+struct Frame {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    thumb: Vec<u8>,
+}
+
+fn frame(png: &[u8]) -> Option<Frame> {
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    if w < 2 || h < 2 {
+        return None;
+    }
+    let mut thumb = Vec::new();
+    let mut y = 0;
+    while y + 8 <= h {
+        let mut x = 0;
+        while x + 8 <= w {
+            let p = img.get_pixel(x, y).0;
+            thumb.push(((p[0] as u32 + 2 * p[1] as u32 + p[2] as u32) / 4) as u8);
+            x += 8;
+        }
+        y += 8;
+    }
+    let (pw, ph) = (w + (w & 1), h + (h & 1));
+    let mut rgba = vec![0u8; (pw * ph * 4) as usize];
+    let src = img.as_raw();
+    for row in 0..ph {
+        let from = row.min(h - 1) as usize * w as usize * 4; // repeat the edge row and column
+        let to = row as usize * pw as usize * 4;
+        rgba[to..to + w as usize * 4].copy_from_slice(&src[from..from + w as usize * 4]);
+        if pw != w {
+            let last = to + (w as usize - 1) * 4;
+            let (head, tail) = rgba.split_at_mut(last + 4);
+            tail[..4].copy_from_slice(&head[last..last + 4]);
+        }
+    }
+    Some(Frame { width: pw, height: ph, rgba, thumb })
+}
+
 struct Writer {
     conn: Connection,
     session: i64,
     spans: HashMap<u64, i64>,
     input_thumb: HashMap<i64, (u32, u32, Vec<u8>)>,
     vocab: HashMap<(&'static str, String), i64>,
+    encoder: Box<dyn ViewEncoder>,
 }
 
 impl Writer {
-    fn new(conn: Connection, session: i64) -> Self {
+    fn new(conn: Connection, session: i64, encoder: Box<dyn ViewEncoder>) -> Self {
         Self {
             conn,
             session,
             spans: HashMap::new(),
             input_thumb: HashMap::new(),
             vocab: HashMap::new(),
+            encoder,
         }
     }
 
@@ -389,17 +534,18 @@ impl Writer {
         Ok(id)
     }
 
-    fn asset(&mut self, png: &[u8]) -> rusqlite::Result<(i64, Option<(u32, u32, Vec<u8>)>)> {
-        let kind = self.intern("asset_kind", "png")?;
+    /// Stores a view as a PyroWave frame with its encoded extent; `None` when it does not decode or
+    /// encode, so no row points at a view that is not there.
+    fn asset(&mut self, png: &[u8]) -> rusqlite::Result<Option<(i64, (u32, u32, Vec<u8>))>> {
+        let Some(f) = frame(png) else { return Ok(None) };
+        let Some(packet) = self.encoder.encode(f.width, f.height, &f.rgba) else { return Ok(None) };
+        let kind = self.intern("asset_kind", "pyrowave")?;
         self.conn
-            .execute("INSERT INTO asset (asset_kind_id, bytes) VALUES (?1, ?2)", params![kind, png])?;
+            .execute("INSERT INTO asset (asset_kind_id, bytes) VALUES (?1, ?2)", params![kind, packet])?;
         let id = self.conn.last_insert_rowid();
-        let thumb = thumb(png);
-        if let Some((w, h, _)) = &thumb {
-            self.conn
-                .execute("INSERT INTO asset_extent VALUES (?1, ?2, ?3)", params![id, w, h])?;
-        }
-        Ok((id, thumb))
+        self.conn
+            .execute("INSERT INTO asset_extent VALUES (?1, ?2, ?3)", params![id, f.width, f.height])?;
+        Ok(Some((id, (f.width, f.height, f.thumb))))
     }
 
     fn write(&mut self, event: Event) -> rusqlite::Result<()> {
@@ -428,8 +574,10 @@ impl Writer {
                     self.conn
                         .execute("INSERT INTO span_parent VALUES (?1, ?2)", params![id, parent])?;
                 }
-                if let Some(png) = view {
-                    let (asset, thumb) = self.asset(&png)?;
+                if let Some((asset, thumb)) = match view {
+                    Some(png) => self.asset(&png)?,
+                    None => None,
+                } {
                     let task = self.intern("task_type", "agent_step")?;
                     let dimension = self.intern("dimension", "instruction_following")?;
                     let column = self.intern("input_column", "source_view")?;
@@ -441,9 +589,7 @@ impl Writer {
                         "INSERT OR IGNORE INTO maskscore_input VALUES (?1, ?2, ?3)",
                         params![id, column, asset],
                     )?;
-                    if let Some(t) = thumb {
-                        self.input_thumb.insert(id, t);
-                    }
+                    self.input_thumb.insert(id, thumb);
                 }
             }
             Event::End { key, ok, at_ms, view } => {
@@ -461,15 +607,18 @@ impl Writer {
                     })
                     .optional()?;
                 let before = self.input_thumb.remove(&id);
-                if let (Some(png), Some(_)) = (view, rooted) {
-                    let (asset, after) = self.asset(&png)?;
+                let stored = match (view, rooted) {
+                    (Some(png), Some(_)) => self.asset(&png)?,
+                    _ => None,
+                };
+                if let Some((asset, after)) = stored {
                     let axis = self.intern("candidate_axis", "view")?;
                     let kind = self.intern("candidate_kind", "after_span")?;
                     self.conn.execute(
                         "INSERT OR IGNORE INTO maskscore_candidate VALUES (?1, ?2, 1, ?3, ?4)",
                         params![id, axis, asset, kind],
                     )?;
-                    if let (Some((bw, bh, b)), Some((aw, ah, a))) = (before, after) {
+                    if let (Some((bw, bh, b)), (aw, ah, a)) = (before, after) {
                         if (bw, bh) == (aw, ah) && !a.is_empty() {
                             let metric = self.intern("metric", "gray_l1_8x8")?;
                             self.conn.execute(
@@ -484,25 +633,6 @@ impl Writer {
         }
         Ok(())
     }
-}
-
-/// One gray value per 8x8 block, as XR Pilot's metric reads a frame: (g = (r + 2g + b) / 4) at each
-/// block's top-left pixel. Returns the image's extent with it; `None` when the PNG does not decode.
-fn thumb(png: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
-    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
-    let (w, h) = img.dimensions();
-    let mut out = Vec::new();
-    let mut y = 0;
-    while y + 8 <= h {
-        let mut x = 0;
-        while x + 8 <= w {
-            let p = img.get_pixel(x, y).0;
-            out.push(((p[0] as u32 + 2 * p[1] as u32 + p[2] as u32) / 4) as u8);
-            x += 8;
-        }
-        y += 8;
-    }
-    Some((w, h, out))
 }
 
 /// Mean absolute difference of two thumbs, 0..1.
@@ -564,6 +694,41 @@ mod tests {
         out.into_inner()
     }
 
+    /// Stands in for the GPU: a "packet" that records the extent and the first pixel.
+    struct FakeEncoder;
+    impl ViewEncoder for FakeEncoder {
+        fn encode(&mut self, w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+            assert_eq!(rgba.len(), (w * h * 4) as usize);
+            assert!(w % 2 == 0 && h % 2 == 0, "4:2:0 needs even extents");
+            Some([&w.to_le_bytes()[..], &h.to_le_bytes()[..], &rgba[..4]].concat())
+        }
+    }
+    struct FailingEncoder;
+    impl ViewEncoder for FailingEncoder {
+        fn encode(&mut self, _: u32, _: u32, _: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    fn open_with(path: &Path, encoder: Box<dyn ViewEncoder>) -> TraceStore {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let conn = open_schema(path).unwrap();
+        conn.execute("INSERT INTO session (started_at) VALUES ('t')", []).unwrap();
+        let session = conn.last_insert_rowid();
+        let (tx, rx) = mpsc::sync_channel(QUEUE_CAPACITY);
+        thread::spawn(move || Writer::new(conn, session, encoder).run(rx));
+        TraceStore {
+            tx,
+            epoch: Instant::now(),
+            next_key: AtomicU64::new(1),
+            running: Mutex::new(Vec::new()),
+            dropped: AtomicU64::new(0),
+            path: path.to_path_buf(),
+        }
+    }
+
     fn temp_db(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("cua-trace-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -594,7 +759,7 @@ mod tests {
     #[test]
     fn spans_nest_end_and_form_an_editscore_pair() {
         let path = temp_db("pair");
-        let store = TraceStore::open(&path).unwrap();
+        let store = open_with(&path, Box::new(FakeEncoder));
         let outer = store.begin("run_steps", &json!({}), None);
         let inner = store.begin("click", &json!({"pid": 1, "x": 3}), Some(png(64, 32, 10)));
         store.end(inner, true, Some(png(64, 32, 200)));
@@ -628,6 +793,15 @@ mod tests {
             conn.query_row("SELECT instruction FROM editscore_pair", [], |r| r.get(0)).unwrap();
         assert_eq!(instruction, r#"click {"pid":1,"x":3}"#);
         let score: f64 = conn.query_row("SELECT metric_value FROM maskscore_score", [], |r| r.get(0)).unwrap();
+        // Views are PyroWave frames at the even-padded extent, never PNG.
+        let kinds: Vec<String> = conn
+            .prepare("SELECT DISTINCT k.name FROM asset JOIN asset_kind k USING (asset_kind_id)")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(kinds, vec!["pyrowave".to_string()]);
         assert!((score - 190.0 / 255.0).abs() < 1e-9, "score {score}");
         // The ETNF rule XR Pilot checks: no column anywhere holds a NULL.
         for table in ["span", "span_detail", "span_parent", "span_end", "asset", "asset_extent", "maskscore_root",
@@ -648,9 +822,38 @@ mod tests {
     }
 
     #[test]
+    fn odd_windows_are_padded_and_a_failed_encode_keeps_no_view() {
+        let path = temp_db("odd");
+        let store = open_with(&path, Box::new(FakeEncoder));
+        let s = store.begin("click", &json!({"pid": 1}), Some(png(673, 439, 50)));
+        store.end(s, true, Some(png(673, 439, 60)));
+        store.flush();
+        let conn = Connection::open(&path).unwrap();
+        let extent: (i64, i64) =
+            conn.query_row("SELECT width, height FROM asset_extent LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(extent, (674, 440));
+
+        // A control: the same calls with an encoder that fails leave plain spans and no assets.
+        let path = temp_db("fail");
+        let store = open_with(&path, Box::new(FailingEncoder));
+        let s = store.begin("click", &json!({"pid": 1}), Some(png(64, 32, 10)));
+        store.end(s, true, Some(png(64, 32, 200)));
+        store.flush();
+        let conn = Connection::open(&path).unwrap();
+        let counts: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM asset), (SELECT count(*) FROM maskscore_root), (SELECT count(*) FROM span_end)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 1));
+    }
+
+    #[test]
     fn a_span_without_a_view_has_no_maskscore_row() {
         let path = temp_db("noview");
-        let store = TraceStore::open(&path).unwrap();
+        let store = open_with(&path, Box::new(FakeEncoder));
         let s = store.begin("list_windows", &json!({}), None);
         store.end(s, true, None);
         store.flush();
