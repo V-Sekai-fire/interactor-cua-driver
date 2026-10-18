@@ -51,6 +51,9 @@ zeroize = { workspace = true }
 coset = { workspace = true }
 ciborium = { workspace = true }
 time = { workspace = true }
+# Span trace in XR Pilot's SQLite schema (src/trace.rs).
+rusqlite = { version = "0.32", features = ["bundled"] }
+dirs = "5"
 getrandom = { workspace = true }
 fs2 = { workspace = true }
 hmac = { workspace = true }

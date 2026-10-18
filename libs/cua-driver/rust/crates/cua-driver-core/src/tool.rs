@@ -2276,6 +2276,19 @@ impl ToolRegistry {
         // Desktop pixels read off a capped get_desktop_state image are mapped
         // back to the uncapped capture before any platform interprets them.
         crate::desktop_capture_scale::map_desktop_args(&mut args);
+        // XR Pilot-style span trace: every call is a span; one that acts on a window also keeps the
+        // window before and after it as a MaskScore row. Read-only calls are spans without views.
+        let trace_target = (!tool.def().read_only).then(|| {
+            (
+                args.get("window_id").and_then(Value::as_u64),
+                args.get("pid").and_then(Value::as_i64),
+            )
+        })
+        .filter(|(w, p)| w.is_some() || p.is_some());
+        let trace_span = crate::trace::global().map(|store| {
+            let view = trace_target.and_then(|(w, p)| screenshot_for(w, p));
+            store.begin(resolved_name, &public_args, view)
+        });
         let mut result = crate::recording::scope_dispatch_click_capture(
             pending_turn.as_ref(),
             tool.invoke(args.clone()),
@@ -2388,6 +2401,10 @@ impl ToolRegistry {
         // as a distinct call site.
         let name = resolved_name;
 
+        if let (Some(store), Some(span)) = (crate::trace::global(), trace_span) {
+            let view = trace_target.and_then(|(w, p)| screenshot_for(w, p));
+            store.end(span, result.is_error != Some(true), view);
+        }
         if let (Some(history), Some(pending)) = (self.history.as_ref(), pending_history) {
             history.finish_action(
                 pending,
