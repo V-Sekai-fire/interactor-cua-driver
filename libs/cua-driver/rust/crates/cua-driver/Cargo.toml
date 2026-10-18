@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Cross-platform background computer-use automation daemon (MCP server)"
-default-run = "cua-driver"
+default-run = "cua-tracer"
 
 [[bin]]
-name = "cua-driver"
+name = "cua-tracer"
 path = "src/main.rs"
 
 [dependencies]

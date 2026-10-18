@@ -12,7 +12,7 @@
 //! `try_send`, and a writer thread owns the database. A full queue drops the event and counts it.
 //!
 //! On by default. `CUA_DRIVER_TRACE=off` turns it off; `CUA_DRIVER_TRACE=<path>` picks the file.
-//! The default file is `traces.sqlite` in the per-user data directory under `V-Sekai-fire/cua-driver`
+//! The default file is `traces.sqlite` in the per-user data directory under `V-Sekai-fire/cua-tracer`
 //! (XR Pilot's is under `V-Sekai-fire/xr-pilot`).
 
 use std::{
@@ -169,7 +169,7 @@ pub fn global() -> Option<&'static TraceStore> {
             let path = match std::env::var("CUA_DRIVER_TRACE") {
                 Ok(v) if v.eq_ignore_ascii_case("off") || v == "0" => return None,
                 Ok(v) if !v.is_empty() => PathBuf::from(v),
-                _ => dirs::data_dir()?.join("V-Sekai-fire").join("cua-driver").join("traces.sqlite"),
+                _ => dirs::data_dir()?.join("V-Sekai-fire").join("cua-tracer").join("traces.sqlite"),
             };
             match TraceStore::open(&path) {
                 Ok(store) => Some(store),

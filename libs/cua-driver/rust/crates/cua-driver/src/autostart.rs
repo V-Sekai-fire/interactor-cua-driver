@@ -494,11 +494,8 @@ Register-ScheduledTask -Force -TaskName $env:CUA_DRIVER_AS_TASK -Action $action 
         // managing the release product. Older versions registered a separate
         // task for the worker; current versions retain no worker autostart.
         // Local management must never alter that release task.
-        if !crate::bundle::is_local_installation() {
-            let _ = Command::new("schtasks")
-                .args(["/Delete", "/TN", "cua-driver-uia", "/F"])
-                .output();
-        }
+        // cua-tracer never registered that worker task, and the legacy name belongs to
+        // the stock cua-driver installed beside it, so it is left alone here.
 
         // schtasks /Delete returns 0 on success, 1 on "task not found"
         // (which we treat as success: the goal is "no task registered"

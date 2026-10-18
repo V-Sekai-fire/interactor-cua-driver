@@ -129,7 +129,7 @@ pub fn finish_response(era: ProtocolEra, method: &str, mut response: Response) -
                     *meta = json!({});
                 }
                 meta["io.modelcontextprotocol/serverInfo"] =
-                    json!({"name": "cua-driver", "version": env!("CARGO_PKG_VERSION")});
+                    json!({"name": "cua-tracer", "version": env!("CARGO_PKG_VERSION")});
                 if method == "server/discover"
                     || method.ends_with("/list")
                     || method.ends_with("/read")

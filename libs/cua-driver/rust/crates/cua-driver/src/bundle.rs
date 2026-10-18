@@ -7,13 +7,13 @@
 
 use std::path::Path;
 
-pub const RELEASE_CLI_NAME: &str = "cua-driver";
-pub const LOCAL_CLI_NAME: &str = "cua-driver-local";
+pub const RELEASE_CLI_NAME: &str = "cua-tracer";
+pub const LOCAL_CLI_NAME: &str = "cua-tracer-local";
 
-pub const RELEASE_APP_NAME: &str = "CuaDriver";
-pub const LOCAL_APP_NAME: &str = "CuaDriverLocal";
-pub const RELEASE_BUNDLE_ID: &str = "com.trycua.driver";
-pub const LOCAL_BUNDLE_ID: &str = "com.trycua.driver.local";
+pub const RELEASE_APP_NAME: &str = "CuaTracer";
+pub const LOCAL_APP_NAME: &str = "CuaTracerLocal";
+pub const RELEASE_BUNDLE_ID: &str = "com.v-sekai-fire.cua-tracer";
+pub const LOCAL_BUNDLE_ID: &str = "com.v-sekai-fire.cua-tracer.local";
 
 pub(crate) fn path_is_local(path: &Path) -> bool {
     let file_name = path
@@ -24,7 +24,7 @@ pub(crate) fn path_is_local(path: &Path) -> bool {
         || file_name == format!("{LOCAL_CLI_NAME}.exe")
         || path
             .components()
-            .any(|component| component.as_os_str().to_str() == Some("CuaDriverLocal.app"))
+            .any(|component| component.as_os_str().to_str() == Some("CuaTracerLocal.app"))
 }
 
 /// Whether this process is the explicitly-installed source-build product.
@@ -45,35 +45,35 @@ pub fn cli_name() -> &'static str {
 
 pub fn state_namespace() -> &'static str {
     if is_local_installation() {
-        "cua-driver-local"
+        "cua-tracer-local"
     } else {
-        "cua-driver"
+        "cua-tracer"
     }
 }
 
 pub fn user_home_subdirectory() -> &'static str {
     if is_local_installation() {
-        ".cua-driver-local"
+        ".cua-tracer-local"
     } else {
-        ".cua-driver"
+        ".cua-tracer"
     }
 }
 
 #[cfg(target_os = "windows")]
 pub fn uia_executable_name() -> &'static str {
     if is_local_installation() {
-        "cua-driver-uia-local.exe"
+        "cua-tracer-uia-local.exe"
     } else {
-        "cua-driver-uia.exe"
+        "cua-tracer-uia.exe"
     }
 }
 
 #[cfg(target_os = "windows")]
 pub fn autostart_task_name() -> &'static str {
     if is_local_installation() {
-        "cua-driver-local-serve"
+        "cua-tracer-local-serve"
     } else {
-        "cua-driver-serve"
+        "cua-tracer-serve"
     }
 }
 
@@ -107,8 +107,8 @@ pub fn is_executable_inside_cuadriver_app() -> bool {
         .and_then(|path| std::fs::canonicalize(path).ok())
         .is_some_and(|path| {
             path.to_str().is_some_and(|path| {
-                path.contains("/CuaDriver.app/Contents/MacOS/")
-                    || path.contains("/CuaDriverLocal.app/Contents/MacOS/")
+                path.contains("/CuaTracer.app/Contents/MacOS/")
+                    || path.contains("/CuaTracerLocal.app/Contents/MacOS/")
             })
         })
 }

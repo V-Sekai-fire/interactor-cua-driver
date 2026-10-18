@@ -12,7 +12,7 @@ const BOUND: Duration = Duration::from_secs(10);
 const PROBE_BOUND: Duration = Duration::from_secs(2);
 
 fn driver(home: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cua-driver"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cua-tracer"));
     command
         .args(args)
         .stdin(Stdio::null())
