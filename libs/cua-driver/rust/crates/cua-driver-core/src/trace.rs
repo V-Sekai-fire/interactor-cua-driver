@@ -172,7 +172,12 @@ pub fn global() -> Option<&'static TraceStore> {
                 _ => dirs::data_dir()?.join("V-Sekai-fire").join("cua-tracer").join("traces.sqlite"),
             };
             match TraceStore::open(&path) {
-                Ok(store) => Some(store),
+                Ok(store) => {
+                    // Spans still in the queue when the process exits (stdin EOF, process::exit)
+                    // would be lost, so drain them at exit. The writer thread is still alive then.
+                    unsafe { libc::atexit(flush_at_exit) };
+                    Some(store)
+                }
                 Err(error) => {
                     tracing::warn!("trace store off: cannot open {}: {error:#}", path.display());
                     None
@@ -180,6 +185,12 @@ pub fn global() -> Option<&'static TraceStore> {
             }
         })
         .as_ref()
+}
+
+extern "C" fn flush_at_exit() {
+    if let Some(Some(store)) = GLOBAL.get() {
+        store.flush();
+    }
 }
 
 impl TraceStore {

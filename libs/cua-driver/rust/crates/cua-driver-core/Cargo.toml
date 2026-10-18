@@ -54,6 +54,7 @@ time = { workspace = true }
 # Span trace in XR Pilot's SQLite schema (src/trace.rs).
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "5"
+libc = "0.2"
 getrandom = { workspace = true }
 fs2 = { workspace = true }
 hmac = { workspace = true }
