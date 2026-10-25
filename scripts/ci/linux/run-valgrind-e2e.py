@@ -282,7 +282,7 @@ def validate_results(artifact_dir: Path) -> None:
     ]
     by_id = {response.get("id"): response for response in responses}
     expect(
-        by_id[1]["result"]["serverInfo"]["name"] == "cua-driver",
+        by_id[1]["result"]["serverInfo"]["name"] == "cua-tracer",
         f"unexpected MCP serverInfo: {by_id[1].get('result')!r}",
     )
     tools = by_id[2]["result"]["tools"]
