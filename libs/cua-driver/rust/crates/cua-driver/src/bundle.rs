@@ -133,15 +133,15 @@ mod tests {
     #[test]
     fn local_identity_requires_the_explicit_local_product_name() {
         assert!(path_is_local(Path::new(
-            "/Applications/CuaDriverLocal.app/Contents/MacOS/cua-driver-local"
+            "/Applications/CuaTracerLocal.app/Contents/MacOS/cua-tracer-local"
         )));
         assert!(path_is_local(Path::new(
-            "/dev/.cua-driver-local/cua-driver-local.exe"
+            "/dev/.cua-tracer-local/cua-tracer-local.exe"
         )));
         assert!(!path_is_local(Path::new(
-            "/Applications/CuaDriver.app/Contents/MacOS/cua-driver"
+            "/Applications/CuaTracer.app/Contents/MacOS/cua-tracer"
         )));
-        assert!(!path_is_local(Path::new("/tmp/cua-driver-local-test")));
+        assert!(!path_is_local(Path::new("/tmp/cua-tracer-local-test")));
     }
 
     #[cfg(target_os = "windows")]

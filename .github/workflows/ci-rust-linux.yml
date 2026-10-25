@@ -106,7 +106,7 @@ jobs:
           export CUA_E2E_SOURCE_SHA
           xvfb-run -a dbus-run-session -- env CUA_PACMAN_TEST_DISPOSABLE=1 \
             bash scripts/ci/linux/test-pacman-updates.sh \
-              libs/cua-driver/rust/target/debug/cua-driver "$PACMAN_TEST_BINARY" \
+              libs/cua-driver/rust/target/debug/cua-tracer "$PACMAN_TEST_BINARY" \
               pacman-update-evidence
       - name: Upload native package evidence
         if: always()

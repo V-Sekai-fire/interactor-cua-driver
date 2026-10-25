@@ -293,7 +293,7 @@ class AuthorizedLiveDemoWorkflowTests(unittest.TestCase):
         self.assertIn("signed-candidate-checksums.txt", candidate_text)
         self.assertIn('measured["code_signing"] == {"status": "not-applicable"', candidate_text)
         self.assertNotIn("cargo build --manifest-path", candidate_text)
-        self.assertNotIn("target/release/cua-driver", candidate_text)
+        self.assertNotIn("target/release/cua-tracer", candidate_text)
         self.assertNotIn("RSA-SHA256", self.evidence_readme)
         self.assertIn("Ed25519", self.evidence_readme)
         self.assertIn("debug review-trust-root", self.evidence_readme)

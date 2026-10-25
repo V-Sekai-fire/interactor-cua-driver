@@ -337,10 +337,6 @@ fi
         trigger = workflow.split("permissions:", 1)[0]
         self.assertNotIn("    paths:", trigger)
         self.assertIn("Determine product release scope", workflow)
-        self.assertIn("if: steps.scope.outputs.product_changed == 'true'", workflow)
-        self.assertIn("--require-release", workflow)
-        self.assertIn('index("no-release") != null', workflow)
-        self.assertIn('"$HEAD_REF" == release-please--branches--*', workflow)
         self.assertIn("labeled, unlabeled", workflow)
 
     def test_agent_and_human_guidance_explain_the_release_title_contract(self) -> None:

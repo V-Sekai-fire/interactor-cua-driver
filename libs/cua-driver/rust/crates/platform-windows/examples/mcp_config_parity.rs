@@ -10,7 +10,7 @@ fn main() {
         .unwrap()
         .parent()
         .unwrap()
-        .join("target/debug/cua-driver.exe");
+        .join("target/debug/cua-tracer.exe");
 
     let cases = [
         // Each (args, expected substrings)

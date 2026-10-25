@@ -482,7 +482,7 @@ if [[ "${LANE}" == browser ]]; then
   # Mirror the Lume gate: the standalone matrix runs against the same
   # unrestricted installed daemon, with a fresh evidence directory and a
   # repo-owned isolated profile per browser row.
-  CUA_TEST_DRIVER_BIN="${CARGO_TARGET_DIR}/release/cua-driver" \
+  CUA_TEST_DRIVER_BIN="${CARGO_TARGET_DIR}/release/cua-tracer" \
     CUA_E2E_BROWSER_PRODUCTS="${STANDALONE_BROWSER_PRODUCTS}" \
     CUA_E2E_BROWSER_STDERR=1 \
     CUA_E2E_ARTIFACT_DIR="${BROWSER_ARTIFACT_DIR}" \

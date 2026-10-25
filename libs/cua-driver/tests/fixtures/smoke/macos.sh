@@ -22,8 +22,8 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
-DRIVER="$ROOT/libs/cua-driver/rust/target/release/cua-driver"
-[[ -x "$DRIVER" ]] || DRIVER="$ROOT/libs/cua-driver/rust/target/debug/cua-driver"
+DRIVER="$ROOT/libs/cua-driver/rust/target/release/cua-tracer"
+[[ -x "$DRIVER" ]] || DRIVER="$ROOT/libs/cua-driver/rust/target/debug/cua-tracer"
 HARNESS_APP="$ROOT/libs/cua-driver/rust/test-apps/harness-appkit/CuaTestHarness.AppKit.app"
 HARNESS_EXE="$HARNESS_APP/Contents/MacOS/CuaTestHarness.AppKit"
 

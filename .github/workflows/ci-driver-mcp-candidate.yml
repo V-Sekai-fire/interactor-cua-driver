@@ -68,8 +68,8 @@ jobs:
         working-directory: libs/cua-driver/rust
         run: |
           set -euo pipefail
-          cargo test -p cua-driver --bin cua-driver mcp_envelope --locked
-          cargo test -p cua-driver --bin cua-driver driver_service_http --locked
+          cargo test -p cua-driver --bin cua-tracer mcp_envelope --locked
+          cargo test -p cua-driver --bin cua-tracer driver_service_http --locked
           cargo test -p cua-driver-sdk remote_receiver::tests --locked
       - name: Build disposable-test binaries
         working-directory: libs/cua-driver/rust

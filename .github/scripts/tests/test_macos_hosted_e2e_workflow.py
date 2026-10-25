@@ -397,7 +397,7 @@ def test_hosted_macos_browser_lane_mirrors_the_lume_standalone_browser_matrix() 
         '--test-requirement "${browser_requirement}"'
     )
     assert 'CUA_E2E_BROWSER_PRODUCTS="${STANDALONE_BROWSER_PRODUCTS}"' in runner
-    assert 'CUA_TEST_DRIVER_BIN="${CARGO_TARGET_DIR}/release/cua-driver"' in runner
+    assert 'CUA_TEST_DRIVER_BIN="${CARGO_TARGET_DIR}/release/cua-tracer"' in runner
     assert "artifacts/cua-driver/macos-standalone-browser" in runner
     assert "artifacts/cua-driver/macos-standalone-browser" in lume
     assert 'CUA_E2E_ARTIFACT_DIR="${BROWSER_ARTIFACT_DIR}"' in runner

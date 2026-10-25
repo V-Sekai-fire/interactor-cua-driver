@@ -2278,13 +2278,14 @@ impl ToolRegistry {
         crate::desktop_capture_scale::map_desktop_args(&mut args);
         // XR Pilot-style span trace: every call is a span; one that acts on a window also keeps the
         // window before and after it as a MaskScore row. Read-only calls are spans without views.
-        let trace_target = (!tool.def().read_only).then(|| {
-            (
-                args.get("window_id").and_then(Value::as_u64),
-                args.get("pid").and_then(Value::as_i64),
-            )
-        })
-        .filter(|(w, p)| w.is_some() || p.is_some());
+        let trace_target = (!tool.def().read_only)
+            .then(|| {
+                (
+                    args.get("window_id").and_then(Value::as_u64),
+                    args.get("pid").and_then(Value::as_i64),
+                )
+            })
+            .filter(|(w, p)| w.is_some() || p.is_some());
         let trace_span = crate::trace::global().map(|store| {
             let view = trace_target.and_then(|(w, p)| screenshot_for(w, p));
             store.begin(resolved_name, &public_args, view)

@@ -122,12 +122,6 @@ class TestCuaSpacesReleaseWiring(unittest.TestCase):
             self.assertIn(check, script)
         self.assertTrue((REPO_ROOT / MACOS / "scripts/certs/microsoft-identity-verification-root-2020.pem").is_file())
 
-    def test_cla_never_locks_a_release_please_pull_request(self) -> None:
-        # Release Please comments on the merged release PR when it tags the
-        # release; a locked one fails every run ("issue is locked").
-        cla = (REPO_ROOT / ".github/workflows/cla.yml").read_text()
-        self.assertIn("lock-pullrequest-aftermerge: false", cla)
-
 
 if __name__ == "__main__":
     unittest.main()

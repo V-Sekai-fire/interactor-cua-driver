@@ -54,7 +54,7 @@ coset = { workspace = true }
 ciborium = { workspace = true }
 time = { workspace = true }
 # Span trace in XR Pilot's SQLite schema (src/trace.rs).
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 dirs = "5"
 libc = "0.2"
 getrandom = { workspace = true }

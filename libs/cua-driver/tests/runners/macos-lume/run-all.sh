@@ -758,7 +758,7 @@ restart_unrestricted_daemon() {
 run_computer_history_gate() {
   local marker="${ARTIFACT_DIR}/history-continuity-marker.json"
   local test_binary="computer_history_macos_test"
-  export CUA_TEST_DRIVER_BIN="${CARGO_TARGET_DIR}/release/cua-driver"
+  export CUA_TEST_DRIVER_BIN="${CARGO_TARGET_DIR}/release/cua-tracer"
   export CUA_E2E_HISTORY_MARKER="${marker}"
 
   echo "[HISTORY] Recording one packaged action before daemon restart"
