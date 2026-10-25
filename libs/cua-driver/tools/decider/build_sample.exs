@@ -1,7 +1,8 @@
-# Builds the Hugging Face sample of decider examples (RFD66606-2334) from a cua-tracer trace store
+# Builds the Hugging Face sample of decider examples (RFD66606-2334) from a trace store (XR Pilot's,
+# or cua-tracer's, which has the same schema)
 # (schema 5, whose sessions, spans and views already carry their UUIDv7s).
 #
-#   elixir build_sample.exs <trace-store.sqlite> <stage dir> <collector seed> <driver commit>
+#   elixir build_sample.exs <trace-store.sqlite> <stage dir> <recorder repo> <recorder commit>
 #
 # Writes Parquet (zstd) under <stage dir>:
 #   etnf/<table>.parquet            the store's tables in ETNF. Sessions, spans and views are keyed
@@ -21,17 +22,20 @@ defmodule BuildSample do
 
   @concept "urn:oid:1.3.6.1.4.1.66606.1.2.2334"
 
-  def main([store, stage, seed, commit]) do
+  def main([store, stage, recorder, commit]) do
     with true <- File.exists?(store) || {:error, {:no_store, store}},
          {:ok, conn} <- Exqlite.Sqlite3.open(store, mode: :readonly),
          {:ok, _} <- conn |> query("PRAGMA user_version") |> schema(),
          {:ok, raw} <- read_all(conn),
          {:ok, sha} <- sha256(store),
-         {:ok, tables} <- etnf(raw, %{store_sha256: sha, seed: seed, commit: commit}),
+         {:ok, tables} <- etnf(raw, %{store_sha256: sha, recorder: recorder, commit: commit}),
          :ok <- check(tables),
          :ok <- File.mkdir_p(Path.join(stage, "etnf")),
          :ok <- write_all(tables, stage) do
-      write(denormalize(tables), Path.join(stage, "decider_denormalized.parquet"))
+      case denormalize(tables) do
+        [] -> {:error, :no_decider_examples}
+        rows -> write(rows, Path.join(stage, "decider_denormalized.parquet"))
+      end
     end
   end
 
@@ -95,10 +99,8 @@ defmodule BuildSample do
           "concept" => @concept,
           "schema_version" => 5,
           "store_sha256" => provenance.store_sha256,
-          "driver" => "V-Sekai-fire/interactor-cua-driver",
-          "driver_commit" => provenance.commit,
-          "collector" => "libs/cua-driver/tools/decider/collect.exs",
-          "collector_seed" => String.to_integer(provenance.seed),
+          "recorder" => provenance.recorder,
+          "recorder_commit" => provenance.commit,
           "host_os" => "macOS",
           "built_at" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
         }
@@ -330,46 +332,77 @@ defmodule BuildSample do
     measure = Map.new(t["decider_measure"] || [], &{{&1["span_uuid"], &1["metric"]}, &1["value"]})
 
     options =
-      t["question_option"]
+      (t["question_option"] || [])
       |> Enum.group_by(& &1["question"])
       |> Map.new(fn {k, v} ->
         {k, v |> Enum.sort_by(& &1["option_index"]) |> Enum.map(& &1["label"])}
       end)
 
-    t["decider_question"]
-    |> Enum.filter(
-      &(input[{&1["span_uuid"], "view_before"}] && input[{&1["span_uuid"], "view_after"}])
-    )
-    |> Enum.sort_by(& &1["span_uuid"])
-    |> Enum.map(fn dq ->
-      id = dq["span_uuid"]
-      sp = span[id]
-      before = input[{id, "view_before"}]
-      after_ = input[{id, "view_after"}]
-      g = gold[{id, dq["question"]}]
-      args = detail[id] && detail[id]["detail"]
+    questions = Enum.group_by(t["decider_question"] || [], & &1["span_uuid"], & &1["question"])
 
-      %{
-        "example_uuid" => id,
-        "concept" => @concept,
-        "session_uuid" => sp["session_uuid"],
-        "session_started_at" => session[sp["session_uuid"]]["started_at"],
-        "started" => sp["started"],
-        "tool" => sp["tool"],
-        "state" => Enum.join(Enum.reject([sp["tool"], args], &is_nil/1), " "),
-        "question" => dq["question"],
-        "question_text" => q[dq["question"]]["text"],
-        "options" => options[dq["question"]],
-        "gold" => g && Enum.at(options[dq["question"]], g),
-        "view_before_jxl" => asset[before]["bytes"],
-        "view_before_width" => extent[before]["width"],
-        "view_before_height" => extent[before]["height"],
-        "view_after_jxl" => asset[after_]["bytes"],
-        "view_after_width" => extent[after_]["width"],
-        "view_after_height" => extent[after_]["height"],
-        "gray_l1_8x8" => measure[{id, "gray_l1_8x8"}]
-      }
-    end)
+    metrics =
+      (t["decider_measure"] || []) |> Enum.map(& &1["metric"]) |> Enum.uniq() |> Enum.sort()
+
+    bytes = fn id, role -> (a = input[{id, role}]) && asset[a]["bytes"] end
+
+    # A view as a Hugging Face Image feature, {bytes, path}: the stored file, WebP for new stores or
+    # the JPEG XL an older store holds (kept as it is), named by its asset UUID and format.
+    image = fn id, role ->
+      with a when not is_nil(a) <- input[{id, role}],
+           bytes = elem(asset[a]["bytes"], 1) do
+        ext = if match?(<<0xFF, 0x0A, _::binary>>, bytes), do: "jxl", else: "webp"
+        %{"bytes" => bytes, "path" => "#{a}.#{ext}"}
+      end
+    end
+
+    size = fn id, role, k -> (a = input[{id, role}]) && extent[a] && extent[a][k] end
+
+    rows =
+      t["decider_example"]
+      |> Enum.map(& &1["span_uuid"])
+      |> Enum.filter(&input[{&1, "view_before"}])
+      |> Enum.sort()
+      |> Enum.flat_map(fn id ->
+        sp = span[id]
+        args = detail[id] && detail[id]["detail"]
+
+        # One row per question; an example that asks none is still one row.
+        Enum.map(Map.get(questions, id, [nil]), fn question ->
+          g = question && gold[{id, question}]
+
+          %{
+            "example_uuid" => id,
+            "concept" => @concept,
+            "session_uuid" => sp["session_uuid"],
+            "session_started_at" => session[sp["session_uuid"]]["started_at"],
+            "started" => sp["started"],
+            "tool" => sp["tool"],
+            "state" => Enum.join(Enum.reject([sp["tool"], args], &is_nil/1), " "),
+            "question" => question,
+            "question_text" => question && q[question]["text"],
+            "options" => question && options[question],
+            "gold" => g && Enum.at(options[question], g),
+            "view_before" => image.(id, "view_before"),
+            "view_before_width" => size.(id, "view_before", "width"),
+            "view_before_height" => size.(id, "view_before", "height"),
+            "view_after" => image.(id, "view_after"),
+            "view_after_width" => size.(id, "view_after", "width"),
+            "view_after_height" => size.(id, "view_after", "height"),
+            "pose_before_f32" => bytes.(id, "pose_before"),
+            "pose_after_f32" => bytes.(id, "pose_after")
+          }
+          |> Map.merge(Map.new(metrics, &{&1, measure[{id, &1}]}))
+        end)
+      end)
+
+    # A column empty in every row (no questions, no poses) is left out.
+    keep =
+      rows
+      |> Enum.flat_map(&Map.keys/1)
+      |> Enum.uniq()
+      |> Enum.filter(fn c -> Enum.any?(rows, &(&1[c] != nil)) end)
+
+    Enum.map(rows, &Map.take(&1, keep))
   end
 
   # --- write ------------------------------------------------------------------------------
@@ -418,6 +451,9 @@ defmodule BuildSample do
       first when :erlang.is_tuple(first) ->
         Series.from_list(Enum.map(values, &(&1 && elem(&1, 1))), dtype: :binary)
 
+      %{"bytes" => _} ->
+        Series.from_list(values, dtype: {:struct, %{"bytes" => :binary, "path" => :string}})
+
       _ ->
         Series.from_list(values)
     end
@@ -429,7 +465,11 @@ case BuildSample.main(System.argv()) do
     :ok
 
   {:error, :usage} ->
-    IO.puts(:stderr, "usage: elixir build_sample.exs <store> <stage dir> <seed> <driver commit>")
+    IO.puts(
+      :stderr,
+      "usage: elixir build_sample.exs <store> <stage dir> <recorder repo> <recorder commit>"
+    )
+
     System.halt(2)
 
   {:error, reason} ->

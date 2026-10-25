@@ -151,15 +151,15 @@ defmodule CheckSample do
 
       differ =
         Enum.count(den, fn r ->
-          views[{r["example_uuid"], "view_before"}] != r["view_before_jxl"] or
-            views[{r["example_uuid"], "view_after"}] != r["view_after_jxl"]
+          views[{r["example_uuid"], "view_before"}] != image_bytes(r["view_before"]) or
+            views[{r["example_uuid"], "view_after"}] != image_bytes(r["view_after"])
         end)
 
       den_gold = den |> Enum.map(& &1["gold"]) |> Enum.reject(&is_nil/1) |> Enum.frequencies()
 
       # Controls: the checks above see one changed byte and one non-v7 key.
       flipped =
-        r["view_before_jxl"]
+        image_bytes(r["view_before"])
         |> :binary.bin_to_list()
         |> List.update_at(-1, &Bitwise.bxor(&1, 1))
         |> :binary.list_to_bin()
@@ -207,6 +207,10 @@ defmodule CheckSample do
   end
 
   def main(_), do: {:error, :usage}
+
+  # A view is a Hugging Face Image feature, {bytes, path}: WebP, or the JPEG XL of an older store.
+  defp image_bytes(%{"bytes" => bytes}), do: bytes
+  defp image_bytes(_), do: nil
 
   defp read_tables(files) do
     Enum.reduce_while(files, {:ok, %{}}, fn f, {:ok, acc} ->

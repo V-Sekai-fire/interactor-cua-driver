@@ -12,8 +12,8 @@
 //! 8x8 gray change) are kept as measures, not turned into answers. The `decider_row` view yields one
 //! row per example and question.
 //!
-//! Views are lossless JPEG XL (ISO/IEC 18181, asset kind `jxl`): the window's 8-bit sRGB pixels
-//! exactly, tagged sRGB, at the window's own size, as XR Pilot keeps its frames. JPEG XL's bitstream
+//! Views are lossless WebP (RFC 9649, asset kind `webp`): the window's 8-bit sRGB pixels
+//! exactly, tagged sRGB, at the window's own size, as XR Pilot keeps its frames. WebP's bitstream
 //! is frozen, so a stored view stays readable. The writer thread encodes it in process. A view that
 //! does not decode or encode is not kept, and the span stays a plain span.
 //!
@@ -255,7 +255,7 @@ impl TraceStore {
         let (tx, rx) = mpsc::sync_channel(QUEUE_CAPACITY);
         let writer = thread::Builder::new()
             .name("cua-trace-writer".into())
-            .spawn(move || Writer::new(conn, session, started_ms, Box::new(Jxl)).run(rx))?;
+            .spawn(move || Writer::new(conn, session, started_ms, Box::new(Webp)).run(rx))?;
         Ok(Self {
             tx,
             epoch,
@@ -420,24 +420,25 @@ pub trait ViewEncoder: Send {
     fn encode(&mut self, width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>>;
 }
 
-/// Lossless JPEG XL: a bare codestream whose colour encoding is the default, sRGB.
-pub struct Jxl;
+/// Lossless WebP (RFC 9649, VP8L): the 8-bit sRGB pixels exactly, from libwebp at method 0, the
+/// same settings XR Pilot's store uses, fast enough to keep up with a trace on one thread.
+pub struct Webp;
 
-impl ViewEncoder for Jxl {
+impl ViewEncoder for Webp {
     fn encode(&mut self, width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>> {
-        use zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions};
-        let options = EncoderOptions::new(
-            width as usize,
-            height as usize,
-            ColorSpace::RGB,
-            BitDepth::Eight,
-        );
-        let mut out = Vec::new();
-        match zune_jpegxl::JxlSimpleEncoder::new(rgb, options).encode(&mut out) {
-            Ok(_) if !out.is_empty() => Some(out),
+        if width == 0 || height == 0 || rgb.len() != (width as usize) * (height as usize) * 3 {
+            return None;
+        }
+        let mut config = webp::WebPConfig::new().ok()?;
+        config.lossless = 1;
+        config.exact = 1;
+        config.method = 0;
+        config.quality = 0.0;
+        match webp::Encoder::from_rgb(rgb, width, height).encode_advanced(&config) {
+            Ok(memory) if !memory.is_empty() => Some(memory.to_vec()),
             Ok(_) => None,
             Err(error) => {
-                tracing::warn!("trace view not kept: JPEG XL encode failed: {error:?}");
+                tracing::warn!("trace view not kept: WebP encode failed: {error:?}");
                 None
             }
         }
@@ -566,7 +567,7 @@ impl Writer {
         Ok(id)
     }
 
-    /// Stores a view as lossless JPEG XL with its extent; `None` when it does not decode or encode,
+    /// Stores a view as lossless WebP with its extent; `None` when it does not decode or encode,
     /// so no row points at a view that is not there.
     /// `at_ms` is the moment the view shows, as an offset into the session.
     fn asset(
@@ -578,7 +579,7 @@ impl Writer {
         let Some(packet) = self.encoder.encode(f.width, f.height, &f.rgb) else {
             return Ok(None);
         };
-        let kind = self.intern("asset_kind", "jxl")?;
+        let kind = self.intern("asset_kind", "webp")?;
         self.conn.execute(
             "INSERT INTO asset (uuid, asset_kind_id, bytes) VALUES (?1, ?2, ?3)",
             params![uuid7(self.started_ms + at_ms), kind, packet],
@@ -938,7 +939,7 @@ mod tests {
         let score: f64 = conn
             .query_row("SELECT value FROM decider_measure", [], |r| r.get(0))
             .unwrap();
-        // Views are JPEG XL, never PNG.
+        // Views are WebP, never PNG.
         let kinds: Vec<String> = conn
             .prepare("SELECT DISTINCT k.name FROM asset JOIN asset_kind k USING (asset_kind_id)")
             .unwrap()
@@ -946,7 +947,7 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert_eq!(kinds, vec!["jxl".to_string()]);
+        assert_eq!(kinds, vec!["webp".to_string()]);
         assert!((score - 190.0 / 255.0).abs() < 1e-9, "score {score}");
         // The ETNF rule XR Pilot checks: no column anywhere holds a NULL.
         for table in [
@@ -1084,26 +1085,21 @@ mod tests {
         (out.into_inner(), img.into_raw())
     }
 
-    fn jxl_decode(bytes: &[u8]) -> (u32, u32, String, Vec<u8>) {
-        let image = jxl_oxide::JxlImage::builder()
-            .read(std::io::Cursor::new(bytes))
-            .unwrap();
-        let colour = format!("{:?}", image.image_header().metadata.colour_encoding);
-        let (w, h) = (image.width(), image.height());
-        let frame = image.render_frame(0).unwrap();
-        let rgb = frame
-            .image_all_channels()
-            .buf()
-            .iter()
-            .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
-            .collect();
-        (w, h, colour, rgb)
+    fn webp_decode(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+        let mut decoder = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        let (w, h) = decoder.dimensions();
+        let mut rgb = vec![0u8; decoder.output_buffer_size().unwrap()];
+        decoder.read_image(&mut rgb).unwrap();
+        if decoder.has_alpha() {
+            rgb = rgb.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+        }
+        (w, h, rgb)
     }
 
     #[test]
-    fn a_stored_view_decodes_to_the_same_pixels_tagged_srgb() {
-        let path = temp_db("jxl");
-        let store = open_with(&path, Box::new(Jxl));
+    fn a_stored_view_decodes_to_the_same_pixels() {
+        let path = temp_db("webp");
+        let store = open_with(&path, Box::new(Webp));
         let (before, before_rgb) = noise_png(673, 439);
         let (after, _) = noise_png(673, 439);
         let s = store.begin("click", &json!({"pid": 1}), Some(before));
@@ -1118,14 +1114,12 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        // A JPEG XL bare codestream starts with FF 0A (ISO/IEC 18181-1).
-        assert_eq!(&bytes[..2], &[0xff, 0x0a]);
-        let (w, h, colour, rgb) = jxl_decode(&bytes);
+        // A WebP file is a RIFF container: "RIFF", a size, "WEBP", then a VP8L (lossless) chunk.
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WEBP");
+        assert_eq!(&bytes[12..16], b"VP8L");
+        let (w, h, rgb) = webp_decode(&bytes);
         assert_eq!((w, h), (673, 439));
-        assert!(
-            colour.contains("primaries: Srgb") && colour.contains("tf: Srgb"),
-            "{colour}"
-        );
         assert_eq!(rgb.len(), before_rgb.len());
         assert!(rgb == before_rgb, "lossless: every pixel comes back");
         // A control: one changed bit is seen, so the equality above can fail.
@@ -1208,7 +1202,7 @@ mod tests {
         assert_eq!(v7_ms("u"), None);
     }
 
-    /// Writes a small real store for the decider tools' CI check (`tools/decider/`): JPEG XL views,
+    /// Writes a small real store for the decider tools' CI check (`tools/decider/`): WebP views,
     /// one confirmed example, one unverifiable, one with no view. Run with `--ignored` and
     /// `CUA_TRACE_FIXTURE=<path>`.
     #[test]
@@ -1216,7 +1210,7 @@ mod tests {
     fn writes_a_fixture_store_for_the_decider_tools() {
         let path = PathBuf::from(std::env::var("CUA_TRACE_FIXTURE").expect("CUA_TRACE_FIXTURE"));
         let _ = std::fs::remove_file(&path);
-        let store = open_with(&path, Box::new(Jxl));
+        let store = open_with(&path, Box::new(Webp));
         let a = store.begin(
             "set_value",
             &json!({"pid": 1, "value": "abc"}),
