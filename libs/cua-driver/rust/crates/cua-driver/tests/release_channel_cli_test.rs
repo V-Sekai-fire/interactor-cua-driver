@@ -86,7 +86,7 @@ mod pacman {
         .unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(root.path().join("release-channel"), "nightly\n").unwrap();
-        std::fs::create_dir(root.path().join(".cua-driver")).unwrap();
+        std::fs::create_dir(root.path().join(".cua-tracer")).unwrap();
         root
     }
 
@@ -144,7 +144,7 @@ mod pacman {
         let root = fixture();
         // A tempting cached upstream nightly must never be advertised.
         let cache = r#"{"latest_version":"999.0.0-nightly.20260907.1","channel":"nightly","last_checked_unix":9999999999}"#;
-        let cache_path = root.path().join(".cua-driver/version_check.json");
+        let cache_path = root.path().join(".cua-tracer/version_check.json");
         std::fs::write(&cache_path, cache).unwrap();
         for args in [
             vec!["check-update", "--json"],
@@ -232,7 +232,7 @@ mod pacman {
             .unwrap()
             .as_secs();
         std::fs::write(
-            root.path().join(".cua-driver/version_check.json"),
+            root.path().join(".cua-tracer/version_check.json"),
             serde_json::json!({
                 "latest_version": "999.0.0",
                 "channel": "stable",
@@ -278,7 +278,7 @@ mod pacman {
             result.raw
         );
         assert_unavailable(&result.raw["result"]["structuredContent"]);
-        assert!(!root.path().join(".cua-driver/version_check.json").exists());
+        assert!(!root.path().join(".cua-tracer/version_check.json").exists());
         assert!(!root.path().join("fake-pacman-called").exists());
     }
 }

@@ -504,7 +504,7 @@ export function targetDir(dir = CUA_DRIVER_DIR): string {
 export function resolveDriverBinary(): string {
   return (
     process.env.CUA_DRIVER_BINARY ||
-    path.join(targetDir(), 'release', process.platform === 'win32' ? 'cua-driver.exe' : 'cua-driver')
+    path.join(targetDir(), 'release', process.platform === 'win32' ? 'cua-tracer.exe' : 'cua-tracer')
   );
 }
 

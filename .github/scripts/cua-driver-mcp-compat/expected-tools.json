@@ -1,5 +1,5 @@
 {
-  "serverName": "cua-driver",
+  "serverName": "cua-tracer",
   "outputSchemaCountByPlatform": {
     "darwin": 35,
     "linux": 39,
