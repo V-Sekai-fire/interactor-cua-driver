@@ -1091,7 +1091,10 @@ mod tests {
         let mut rgb = vec![0u8; decoder.output_buffer_size().unwrap()];
         decoder.read_image(&mut rgb).unwrap();
         if decoder.has_alpha() {
-            rgb = rgb.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+            rgb = rgb
+                .chunks_exact(4)
+                .flat_map(|p| [p[0], p[1], p[2]])
+                .collect();
         }
         (w, h, rgb)
     }
