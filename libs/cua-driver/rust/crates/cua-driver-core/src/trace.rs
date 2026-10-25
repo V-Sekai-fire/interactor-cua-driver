@@ -206,7 +206,10 @@ pub fn global() -> Option<&'static TraceStore> {
             let path = match std::env::var("CUA_DRIVER_TRACE") {
                 Ok(v) if v.eq_ignore_ascii_case("off") || v == "0" => return None,
                 Ok(v) if !v.is_empty() => PathBuf::from(v),
-                _ => dirs::data_dir()?.join("V-Sekai-fire").join("cua-tracer").join("traces.sqlite"),
+                _ => dirs::data_dir()?
+                    .join("V-Sekai-fire")
+                    .join("cua-tracer")
+                    .join("traces.sqlite"),
             };
             match TraceStore::open(&path) {
                 Ok(store) => {
@@ -335,8 +338,11 @@ fn open_schema(path: &Path) -> anyhow::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(std::time::Duration::from_millis(2000))?;
     let have: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    let tables: i64 =
-        conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |r| r.get(0))?;
+    let tables: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table'",
+        [],
+        |r| r.get(0),
+    )?;
     if tables > 0 && have != SCHEMA_VERSION {
         // An older store keeps its rows under its own name; this one starts over.
         drop(conn);
@@ -367,7 +373,9 @@ pub fn detail(args: &Value) -> String {
                     .filter(|(k, _)| !k.starts_with('_'))
                     .map(|(k, v)| {
                         let v = match (REDACTED_KEYS.contains(&k.as_str()), v) {
-                            (true, Value::String(s)) => Value::String(format!("<{} chars>", s.chars().count())),
+                            (true, Value::String(s)) => {
+                                Value::String(format!("<{} chars>", s.chars().count()))
+                            }
                             (true, Value::Null) => Value::Null,
                             (true, _) => Value::String("<redacted>".into()),
                             (false, v) => scrub(v),
@@ -398,7 +406,12 @@ pub struct Jxl;
 impl ViewEncoder for Jxl {
     fn encode(&mut self, width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>> {
         use zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions};
-        let options = EncoderOptions::new(width as usize, height as usize, ColorSpace::RGB, BitDepth::Eight);
+        let options = EncoderOptions::new(
+            width as usize,
+            height as usize,
+            ColorSpace::RGB,
+            BitDepth::Eight,
+        );
         let mut out = Vec::new();
         match zune_jpegxl::JxlSimpleEncoder::new(rgb, options).encode(&mut out) {
             Ok(_) if !out.is_empty() => Some(out),
@@ -420,7 +433,9 @@ struct Frame {
 }
 
 fn frame(png: &[u8]) -> Option<Frame> {
-    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgb8();
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .ok()?
+        .to_rgb8();
     let (width, height) = img.dimensions();
     if width == 0 || height == 0 {
         return None;
@@ -436,7 +451,12 @@ fn frame(png: &[u8]) -> Option<Frame> {
         }
         y += 8;
     }
-    Some(Frame { width, height, rgb: img.into_raw(), thumb })
+    Some(Frame {
+        width,
+        height,
+        rgb: img.into_raw(),
+        thumb,
+    })
 }
 
 struct Writer {
@@ -482,8 +502,10 @@ impl Writer {
         if let Some(id) = self.vocab.get(&(table, name.to_string())) {
             return Ok(*id);
         }
-        self.conn
-            .execute(&format!("INSERT OR IGNORE INTO {table} (name) VALUES (?1)"), params![name])?;
+        self.conn.execute(
+            &format!("INSERT OR IGNORE INTO {table} (name) VALUES (?1)"),
+            params![name],
+        )?;
         let id: i64 = self.conn.query_row(
             &format!("SELECT {table}_id FROM {table} WHERE name = ?1"),
             params![name],
@@ -499,10 +521,15 @@ impl Writer {
         if let Some(id) = self.vocab.get(&("question", name.to_string())) {
             return Ok(*id);
         }
-        self.conn
-            .execute("INSERT OR IGNORE INTO question (name, text) VALUES (?1, ?2)", params![name, text])?;
-        let id: i64 =
-            self.conn.query_row("SELECT question_id FROM question WHERE name = ?1", params![name], |r| r.get(0))?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO question (name, text) VALUES (?1, ?2)",
+            params![name, text],
+        )?;
+        let id: i64 = self.conn.query_row(
+            "SELECT question_id FROM question WHERE name = ?1",
+            params![name],
+            |r| r.get(0),
+        )?;
         for (i, label) in options.iter().enumerate() {
             self.conn.execute(
                 "INSERT OR IGNORE INTO question_option VALUES (?1, ?2, ?3)",
@@ -516,18 +543,25 @@ impl Writer {
     /// Stores a view as lossless JPEG XL with its extent; `None` when it does not decode or encode,
     /// so no row points at a view that is not there.
     /// `at_ms` is the moment the view shows, as an offset into the session.
-    fn asset(&mut self, png: &[u8], at_ms: i64) -> rusqlite::Result<Option<(i64, (u32, u32, Vec<u8>))>> {
+    fn asset(
+        &mut self,
+        png: &[u8],
+        at_ms: i64,
+    ) -> rusqlite::Result<Option<(i64, (u32, u32, Vec<u8>))>> {
         let Some(f) = frame(png) else { return Ok(None) };
-        let Some(packet) = self.encoder.encode(f.width, f.height, &f.rgb) else { return Ok(None) };
+        let Some(packet) = self.encoder.encode(f.width, f.height, &f.rgb) else {
+            return Ok(None);
+        };
         let kind = self.intern("asset_kind", "jxl")?;
-        self.conn
-            .execute(
-                "INSERT INTO asset (uuid, asset_kind_id, bytes) VALUES (?1, ?2, ?3)",
-                params![uuid7(self.started_ms + at_ms), kind, packet],
-            )?;
+        self.conn.execute(
+            "INSERT INTO asset (uuid, asset_kind_id, bytes) VALUES (?1, ?2, ?3)",
+            params![uuid7(self.started_ms + at_ms), kind, packet],
+        )?;
         let id = self.conn.last_insert_rowid();
-        self.conn
-            .execute("INSERT INTO asset_extent VALUES (?1, ?2, ?3)", params![id, f.width, f.height])?;
+        self.conn.execute(
+            "INSERT INTO asset_extent VALUES (?1, ?2, ?3)",
+            params![id, f.width, f.height],
+        )?;
         Ok(Some((id, (f.width, f.height, f.thumb))))
     }
 
@@ -541,7 +575,14 @@ impl Writer {
 
     fn write_in_transaction(&mut self, event: Event) -> rusqlite::Result<()> {
         match event {
-            Event::Begin { key, parent, tool, detail, at_ms, view } => {
+            Event::Begin {
+                key,
+                parent,
+                tool,
+                detail,
+                at_ms,
+                view,
+            } => {
                 let tool_id = self.intern("tool", &tool)?;
                 self.conn.execute(
                     "INSERT INTO span (uuid, session_id, span_key, tool_id, started) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -550,12 +591,16 @@ impl Writer {
                 let id = self.conn.last_insert_rowid();
                 self.spans.insert(key, id);
                 if !detail.is_empty() {
-                    self.conn
-                        .execute("INSERT INTO span_detail VALUES (?1, ?2)", params![id, detail])?;
+                    self.conn.execute(
+                        "INSERT INTO span_detail VALUES (?1, ?2)",
+                        params![id, detail],
+                    )?;
                 }
                 if let Some(parent) = parent.and_then(|p| self.spans.get(&p).copied()) {
-                    self.conn
-                        .execute("INSERT INTO span_parent VALUES (?1, ?2)", params![id, parent])?;
+                    self.conn.execute(
+                        "INSERT INTO span_parent VALUES (?1, ?2)",
+                        params![id, parent],
+                    )?;
                 }
                 if let Some((asset, thumb)) = match view {
                     Some(png) => self.asset(&png, at_ms)?,
@@ -574,7 +619,13 @@ impl Writer {
                     self.input_thumb.insert(id, thumb);
                 }
             }
-            Event::End { key, ok, at_ms, view, effect } => {
+            Event::End {
+                key,
+                ok,
+                at_ms,
+                view,
+                effect,
+            } => {
                 let Some(id) = self.spans.remove(&key) else {
                     return Ok(());
                 };
@@ -584,9 +635,11 @@ impl Writer {
                 )?;
                 let example: Option<i64> = self
                     .conn
-                    .query_row("SELECT span_id FROM decider_example WHERE span_id = ?1", params![id], |r| {
-                        r.get(0)
-                    })
+                    .query_row(
+                        "SELECT span_id FROM decider_example WHERE span_id = ?1",
+                        params![id],
+                        |r| r.get(0),
+                    )
                     .optional()?;
                 let before = self.input_thumb.remove(&id);
                 if example.is_none() {
@@ -635,7 +688,11 @@ impl Writer {
 
 /// Mean absolute difference of two thumbs, 0..1.
 fn gray_l1(a: &[u8], b: &[u8]) -> f64 {
-    let sum: u64 = a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64).sum();
+    let sum: u64 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64)
+        .sum();
     sum as f64 / a.len() as f64 / 255.0
 }
 
@@ -643,18 +700,23 @@ fn gray_l1(a: &[u8], b: &[u8]) -> f64 {
 /// timed to the moment it describes, so rows from many stores merge without collisions.
 pub fn uuid7(unix_ms: i64) -> String {
     let ms = unix_ms.max(0) as u64;
-    let ts = uuid::Timestamp::from_unix(uuid::NoContext, ms / 1000, ((ms % 1000) * 1_000_000) as u32);
+    let ts =
+        uuid::Timestamp::from_unix(uuid::NoContext, ms / 1000, ((ms % 1000) * 1_000_000) as u32);
     uuid::Uuid::new_v7(ts).to_string()
 }
 
 fn unix_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// RECTGTN's offset form, as XR Pilot writes it: `PT1M2.5S`.
 pub fn iso_duration(ms: i64) -> String {
     let ms = ms.max(0);
-    let (hours, minutes, seconds, millis) = (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000);
+    let (hours, minutes, seconds, millis) =
+        (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000);
     let mut out = String::from("PT");
     if hours > 0 {
         out += &format!("{hours}H");
@@ -740,7 +802,8 @@ mod tests {
     }
 
     fn temp_db(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cua-trace-test-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("cua-trace-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("traces.sqlite")
     }
@@ -783,14 +846,23 @@ mod tests {
         let store = open_with(&path, Box::new(FakeEncoder));
         let outer = store.begin("run_steps", &json!({}), None);
         let inner = store.begin("click", &json!({"pid": 1, "x": 3}), Some(png(64, 32, 10)));
-        store.end(inner, true, Some(png(64, 32, 200)), Some(ActionEffect::Confirmed));
+        store.end(
+            inner,
+            true,
+            Some(png(64, 32, 200)),
+            Some(ActionEffect::Confirmed),
+        );
         store.end(outer, false, None, None);
         store.flush();
 
         let conn = Connection::open(&path).unwrap();
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
-        let spans: i64 = conn.query_row("SELECT count(*) FROM span", [], |r| r.get(0)).unwrap();
+        let spans: i64 = conn
+            .query_row("SELECT count(*) FROM span", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(spans, 2);
         let (child_tool, parent_tool): (String, String) = conn
             .query_row(
@@ -801,7 +873,10 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!((child_tool.as_str(), parent_tool.as_str()), ("click", "run_steps"));
+        assert_eq!(
+            (child_tool.as_str(), parent_tool.as_str()),
+            ("click", "run_steps")
+        );
         let ends: Vec<i64> = conn
             .prepare("SELECT ok FROM span_end ORDER BY span_id")
             .unwrap()
@@ -810,7 +885,9 @@ mod tests {
             .map(Result::unwrap)
             .collect();
         assert_eq!(ends, vec![0, 1]);
-        let state: String = conn.query_row("SELECT DISTINCT state FROM decider_row", [], |r| r.get(0)).unwrap();
+        let state: String = conn
+            .query_row("SELECT DISTINCT state FROM decider_row", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(state, r#"click {"pid":1,"x":3}"#);
         assert_eq!(
             gold(&conn),
@@ -827,8 +904,13 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert_eq!(roles, vec!["view_after".to_string(), "view_before".to_string()]);
-        let score: f64 = conn.query_row("SELECT value FROM decider_measure", [], |r| r.get(0)).unwrap();
+        assert_eq!(
+            roles,
+            vec!["view_after".to_string(), "view_before".to_string()]
+        );
+        let score: f64 = conn
+            .query_row("SELECT value FROM decider_measure", [], |r| r.get(0))
+            .unwrap();
         // Views are JPEG XL, never PNG.
         let kinds: Vec<String> = conn
             .prepare("SELECT DISTINCT k.name FROM asset JOIN asset_kind k USING (asset_kind_id)")
@@ -840,9 +922,21 @@ mod tests {
         assert_eq!(kinds, vec!["jxl".to_string()]);
         assert!((score - 190.0 / 255.0).abs() < 1e-9, "score {score}");
         // The ETNF rule XR Pilot checks: no column anywhere holds a NULL.
-        for table in ["span", "span_detail", "span_parent", "span_end", "asset", "asset_extent", "question",
-            "question_option", "decider_example", "decider_input", "decider_question", "decider_gold",
-            "decider_measure"] {
+        for table in [
+            "span",
+            "span_detail",
+            "span_parent",
+            "span_end",
+            "asset",
+            "asset_extent",
+            "question",
+            "question_option",
+            "decider_example",
+            "decider_input",
+            "decider_question",
+            "decider_gold",
+            "decider_measure",
+        ] {
             let cols: Vec<String> = conn
                 .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
                 .unwrap()
@@ -851,8 +945,13 @@ mod tests {
                 .map(Result::unwrap)
                 .collect();
             for c in cols {
-                let nulls: i64 =
-                    conn.query_row(&format!("SELECT count(*) FROM {table} WHERE {c} IS NULL"), [], |r| r.get(0)).unwrap();
+                let nulls: i64 = conn
+                    .query_row(
+                        &format!("SELECT count(*) FROM {table} WHERE {c} IS NULL"),
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
                 assert_eq!(nulls, 0, "{table}.{c}");
             }
         }
@@ -863,12 +962,26 @@ mod tests {
         let path = temp_db("unverifiable");
         let store = open_with(&path, Box::new(FakeEncoder));
         let s = store.begin("click", &json!({"pid": 1}), Some(png(64, 32, 10)));
-        store.end(s, true, Some(png(64, 32, 10)), Some(ActionEffect::Unverifiable));
+        store.end(
+            s,
+            true,
+            Some(png(64, 32, 10)),
+            Some(ActionEffect::Unverifiable),
+        );
         // A control: the same call with a measured effect does get its gold.
         let c = store.begin("click", &json!({"pid": 2}), Some(png(64, 32, 10)));
-        store.end(c, true, Some(png(64, 32, 10)), Some(ActionEffect::SuspectedNoop));
+        store.end(
+            c,
+            true,
+            Some(png(64, 32, 10)),
+            Some(ActionEffect::SuspectedNoop),
+        );
         // A tool with no action record asks no question.
-        let n = store.begin("get_window_state", &json!({"pid": 3}), Some(png(64, 32, 10)));
+        let n = store.begin(
+            "get_window_state",
+            &json!({"pid": 3}),
+            Some(png(64, 32, 10)),
+        );
         store.end(n, true, Some(png(64, 32, 10)), None);
         store.flush();
         let conn = Connection::open(&path).unwrap();
@@ -876,15 +989,24 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].2, None);
         assert_eq!(rows[1].2.as_deref(), Some("suspected_noop"));
-        let golds: i64 = conn.query_row("SELECT count(*) FROM decider_gold", [], |r| r.get(0)).unwrap();
+        let golds: i64 = conn
+            .query_row("SELECT count(*) FROM decider_gold", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(golds, 1);
-        let examples: i64 = conn.query_row("SELECT count(*) FROM decider_example", [], |r| r.get(0)).unwrap();
+        let examples: i64 = conn
+            .query_row("SELECT count(*) FROM decider_example", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(examples, 3);
     }
 
     #[test]
     fn every_effect_but_unverifiable_is_an_option() {
-        for e in [ActionEffect::Confirmed, ActionEffect::Partial, ActionEffect::SuspectedNoop, ActionEffect::Refused] {
+        for e in [
+            ActionEffect::Confirmed,
+            ActionEffect::Partial,
+            ActionEffect::SuspectedNoop,
+            ActionEffect::Refused,
+        ] {
             assert!(EFFECT_OPTIONS.contains(&effect_gold(e).unwrap()), "{e:?}");
         }
         assert_eq!(effect_gold(ActionEffect::Unverifiable), None);
@@ -898,8 +1020,11 @@ mod tests {
         store.end(s, true, Some(png(673, 439, 60)), None);
         store.flush();
         let conn = Connection::open(&path).unwrap();
-        let extent: (i64, i64) =
-            conn.query_row("SELECT width, height FROM asset_extent LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        let extent: (i64, i64) = conn
+            .query_row("SELECT width, height FROM asset_extent LIMIT 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
         assert_eq!(extent, (673, 439));
 
         // A control: the same calls with an encoder that fails leave plain spans and no assets.
@@ -922,7 +1047,9 @@ mod tests {
     /// The pixels of an image that is not flat: every pixel differs from its neighbours.
     fn noise_png(w: u32, h: u32) -> (Vec<u8>, Vec<u8>) {
         let img = image::RgbImage::from_fn(w, h, |x, y| {
-            let v = x.wrapping_mul(2654435761).wrapping_add(y.wrapping_mul(40503));
+            let v = x
+                .wrapping_mul(2654435761)
+                .wrapping_add(y.wrapping_mul(40503));
             image::Rgb([v as u8, (v >> 8) as u8, (v >> 16) as u8])
         });
         let mut out = std::io::Cursor::new(Vec::new());
@@ -931,11 +1058,18 @@ mod tests {
     }
 
     fn jxl_decode(bytes: &[u8]) -> (u32, u32, String, Vec<u8>) {
-        let image = jxl_oxide::JxlImage::builder().read(std::io::Cursor::new(bytes)).unwrap();
+        let image = jxl_oxide::JxlImage::builder()
+            .read(std::io::Cursor::new(bytes))
+            .unwrap();
         let colour = format!("{:?}", image.image_header().metadata.colour_encoding);
         let (w, h) = (image.width(), image.height());
         let frame = image.render_frame(0).unwrap();
-        let rgb = frame.image_all_channels().buf().iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8).collect();
+        let rgb = frame
+            .image_all_channels()
+            .buf()
+            .iter()
+            .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+            .collect();
         (w, h, colour, rgb)
     }
 
@@ -961,7 +1095,10 @@ mod tests {
         assert_eq!(&bytes[..2], &[0xff, 0x0a]);
         let (w, h, colour, rgb) = jxl_decode(&bytes);
         assert_eq!((w, h), (673, 439));
-        assert!(colour.contains("primaries: Srgb") && colour.contains("tf: Srgb"), "{colour}");
+        assert!(
+            colour.contains("primaries: Srgb") && colour.contains("tf: Srgb"),
+            "{colour}"
+        );
         assert_eq!(rgb.len(), before_rgb.len());
         assert!(rgb == before_rgb, "lossless: every pixel comes back");
         // A control: one changed bit is seen, so the equality above can fail.
@@ -991,14 +1128,29 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         let rows = |sql: &str| -> Vec<(String, String)> {
             let mut st = conn.prepare(sql).unwrap();
-            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect()
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
         };
         let session = rows("SELECT uuid, started_at FROM session");
-        let start = time::OffsetDateTime::parse(&session[0].1, &time::format_description::well_known::Rfc3339).unwrap();
+        let start = time::OffsetDateTime::parse(
+            &session[0].1,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
         let start_ms = (start.unix_timestamp_nanos() / 1_000_000) as i64;
-        assert_eq!(v7_ms(&session[0].0), Some(start_ms), "the session's UUIDv7 is its start");
+        assert_eq!(
+            v7_ms(&session[0].0),
+            Some(start_ms),
+            "the session's UUIDv7 is its start"
+        );
         let offset = |d: &str| -> i64 {
-            let secs: f64 = d.trim_start_matches("PT").trim_end_matches('S').parse().unwrap();
+            let secs: f64 = d
+                .trim_start_matches("PT")
+                .trim_end_matches('S')
+                .parse()
+                .unwrap();
             (secs * 1000.0).round() as i64
         };
         let spans = rows("SELECT uuid, started FROM span");
@@ -1009,9 +1161,18 @@ mod tests {
         );
         assert_eq!((spans.len(), views.len()), (2, 4));
         for (uuid, at) in spans.iter().chain(views.iter()) {
-            assert_eq!(v7_ms(uuid), Some(start_ms + offset(at)), "{uuid} is timed to its row ({at})");
+            assert_eq!(
+                v7_ms(uuid),
+                Some(start_ms + offset(at)),
+                "{uuid} is timed to its row ({at})"
+            );
         }
-        let mut all: Vec<&String> = session.iter().chain(&spans).chain(&views).map(|(u, _)| u).collect();
+        let mut all: Vec<&String> = session
+            .iter()
+            .chain(&spans)
+            .chain(&views)
+            .map(|(u, _)| u)
+            .collect();
         all.sort();
         all.dedup();
         assert_eq!(all.len(), 7, "every name is distinct");
@@ -1029,10 +1190,24 @@ mod tests {
         let path = PathBuf::from(std::env::var("CUA_TRACE_FIXTURE").expect("CUA_TRACE_FIXTURE"));
         let _ = std::fs::remove_file(&path);
         let store = open_with(&path, Box::new(Jxl));
-        let a = store.begin("set_value", &json!({"pid": 1, "value": "abc"}), Some(png(96, 64, 30)));
-        store.end(a, true, Some(png(96, 64, 220)), Some(ActionEffect::Confirmed));
+        let a = store.begin(
+            "set_value",
+            &json!({"pid": 1, "value": "abc"}),
+            Some(png(96, 64, 30)),
+        );
+        store.end(
+            a,
+            true,
+            Some(png(96, 64, 220)),
+            Some(ActionEffect::Confirmed),
+        );
         let b = store.begin("click", &json!({"pid": 1, "x": 3}), Some(png(96, 64, 30)));
-        store.end(b, true, Some(png(96, 64, 30)), Some(ActionEffect::Unverifiable));
+        store.end(
+            b,
+            true,
+            Some(png(96, 64, 30)),
+            Some(ActionEffect::Unverifiable),
+        );
         let c = store.begin("list_windows", &json!({}), None);
         store.end(c, true, None, None);
         store.flush();
@@ -1046,10 +1221,17 @@ mod tests {
         store.end(s, true, None, None);
         store.flush();
         let conn = Connection::open(&path).unwrap();
-        let roots: i64 = conn.query_row("SELECT count(*) FROM decider_example", [], |r| r.get(0)).unwrap();
+        let roots: i64 = conn
+            .query_row("SELECT count(*) FROM decider_example", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(roots, 0);
-        let details: i64 = conn.query_row("SELECT count(*) FROM span_detail", [], |r| r.get(0)).unwrap();
-        assert_eq!(details, 0, "empty arguments are a missing row, not an empty string");
+        let details: i64 = conn
+            .query_row("SELECT count(*) FROM span_detail", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            details, 0,
+            "empty arguments are a missing row, not an empty string"
+        );
     }
 
     #[test]
@@ -1058,7 +1240,8 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         {
             let c = Connection::open(&path).unwrap();
-            c.execute_batch("CREATE TABLE old (x); PRAGMA user_version = 3;").unwrap();
+            c.execute_batch("CREATE TABLE old (x); PRAGMA user_version = 3;")
+                .unwrap();
         }
         let _store = TraceStore::open(&path).unwrap();
         assert!(PathBuf::from(format!("{}.v3", path.display())).exists());
