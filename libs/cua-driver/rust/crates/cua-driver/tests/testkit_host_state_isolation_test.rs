@@ -27,10 +27,12 @@ fn history_roots(home: &Path) -> Vec<PathBuf> {
     } else {
         home.join(".local").join("state")
     };
-    let mut roots: Vec<_> = ["cua-driver", "cua-driver-local"]
+    let mut roots: Vec<_> = ["cua-tracer", "cua-tracer-local"]
         .into_iter()
         .map(|namespace| base.join(namespace).join("computer-history"))
         .collect();
+    roots.push(home.join(".cua-tracer").join("computer-history"));
+    // CUA_DRIVER_RS_HOME below points here.
     roots.push(home.join(".cua-driver").join("computer-history"));
     roots
 }
