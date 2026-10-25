@@ -1,5 +1,5 @@
 //! Every tool call as a span, kept in SQLite in the schema XR Pilot's `TraceStore` writes
-//! (V-Sekai-fire/interactor-xr-pilot `core/src/TraceStore.cpp`, schema version 4), so the same readers
+//! (V-Sekai-fire/interactor-xr-pilot `core/src/TraceStore.cpp`, schema version 5), so the same readers
 //! work on both. The store is in Essential Tuple Normal Form: facts that may be missing (an end, a
 //! parent, a detail, a gold answer, a measure, an image's extent) are satellite relations, never
 //! nullable columns.
@@ -40,7 +40,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 /// Bumped with XR Pilot's: an older store is moved aside, not altered.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 const QUEUE_CAPACITY: usize = 256;
 
 /// The interned vocabularies, one relation each (XR Pilot's list).
@@ -49,9 +49,11 @@ const VOCABULARIES: &[&str] = &["tool", "task_type", "input_role", "asset_kind",
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS session (
     session_id INTEGER PRIMARY KEY,
+    uuid TEXT NOT NULL UNIQUE,
     started_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS span (
     span_id INTEGER PRIMARY KEY,
+    uuid TEXT NOT NULL UNIQUE,
     session_id INTEGER NOT NULL REFERENCES session,
     span_key TEXT NOT NULL,
     tool_id INTEGER NOT NULL REFERENCES tool,
@@ -75,6 +77,7 @@ CREATE TABLE IF NOT EXISTS span_command (
     PRIMARY KEY (span_id, seq));
 CREATE TABLE IF NOT EXISTS asset (
     asset_id INTEGER PRIMARY KEY,
+    uuid TEXT NOT NULL UNIQUE,
     asset_kind_id INTEGER NOT NULL REFERENCES asset_kind,
     bytes BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS asset_extent (
@@ -234,14 +237,17 @@ impl TraceStore {
             std::fs::create_dir_all(dir)?;
         }
         let conn = open_schema(path)?;
-        let started_at = civil_time(unix_ms());
-        conn.execute("INSERT INTO session (started_at) VALUES (?1)", params![started_at])?;
+        let epoch = Instant::now();
+        let started_ms = unix_ms();
+        conn.execute(
+            "INSERT INTO session (uuid, started_at) VALUES (?1, ?2)",
+            params![uuid7(started_ms), civil_time(started_ms)],
+        )?;
         let session = conn.last_insert_rowid();
         let (tx, rx) = mpsc::sync_channel(QUEUE_CAPACITY);
-        let epoch = Instant::now();
         thread::Builder::new()
             .name("cua-trace-writer".into())
-            .spawn(move || Writer::new(conn, session, Box::new(Jxl)).run(rx))?;
+            .spawn(move || Writer::new(conn, session, started_ms, Box::new(Jxl)).run(rx))?;
         Ok(Self {
             tx,
             epoch,
@@ -436,6 +442,8 @@ fn frame(png: &[u8]) -> Option<Frame> {
 struct Writer {
     conn: Connection,
     session: i64,
+    /// The session's start in Unix milliseconds: a row's UUIDv7 time is this plus the row's offset.
+    started_ms: i64,
     spans: HashMap<u64, i64>,
     input_thumb: HashMap<i64, (u32, u32, Vec<u8>)>,
     vocab: HashMap<(&'static str, String), i64>,
@@ -443,10 +451,11 @@ struct Writer {
 }
 
 impl Writer {
-    fn new(conn: Connection, session: i64, encoder: Box<dyn ViewEncoder>) -> Self {
+    fn new(conn: Connection, session: i64, started_ms: i64, encoder: Box<dyn ViewEncoder>) -> Self {
         Self {
             conn,
             session,
+            started_ms,
             spans: HashMap::new(),
             input_thumb: HashMap::new(),
             vocab: HashMap::new(),
@@ -506,12 +515,16 @@ impl Writer {
 
     /// Stores a view as lossless JPEG XL with its extent; `None` when it does not decode or encode,
     /// so no row points at a view that is not there.
-    fn asset(&mut self, png: &[u8]) -> rusqlite::Result<Option<(i64, (u32, u32, Vec<u8>))>> {
+    /// `at_ms` is the moment the view shows, as an offset into the session.
+    fn asset(&mut self, png: &[u8], at_ms: i64) -> rusqlite::Result<Option<(i64, (u32, u32, Vec<u8>))>> {
         let Some(f) = frame(png) else { return Ok(None) };
         let Some(packet) = self.encoder.encode(f.width, f.height, &f.rgb) else { return Ok(None) };
         let kind = self.intern("asset_kind", "jxl")?;
         self.conn
-            .execute("INSERT INTO asset (asset_kind_id, bytes) VALUES (?1, ?2)", params![kind, packet])?;
+            .execute(
+                "INSERT INTO asset (uuid, asset_kind_id, bytes) VALUES (?1, ?2, ?3)",
+                params![uuid7(self.started_ms + at_ms), kind, packet],
+            )?;
         let id = self.conn.last_insert_rowid();
         self.conn
             .execute("INSERT INTO asset_extent VALUES (?1, ?2, ?3)", params![id, f.width, f.height])?;
@@ -531,8 +544,8 @@ impl Writer {
             Event::Begin { key, parent, tool, detail, at_ms, view } => {
                 let tool_id = self.intern("tool", &tool)?;
                 self.conn.execute(
-                    "INSERT INTO span (session_id, span_key, tool_id, started) VALUES (?1, ?2, ?3, ?4)",
-                    params![self.session, key.to_string(), tool_id, iso_duration(at_ms)],
+                    "INSERT INTO span (uuid, session_id, span_key, tool_id, started) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![uuid7(self.started_ms + at_ms), self.session, key.to_string(), tool_id, iso_duration(at_ms)],
                 )?;
                 let id = self.conn.last_insert_rowid();
                 self.spans.insert(key, id);
@@ -545,7 +558,7 @@ impl Writer {
                         .execute("INSERT INTO span_parent VALUES (?1, ?2)", params![id, parent])?;
                 }
                 if let Some((asset, thumb)) = match view {
-                    Some(png) => self.asset(&png)?,
+                    Some(png) => self.asset(&png, at_ms)?,
                     None => None,
                 } {
                     let task = self.intern("task_type", "agent_step")?;
@@ -594,7 +607,7 @@ impl Writer {
                     }
                 }
                 let stored = match view {
-                    Some(png) => self.asset(&png)?,
+                    Some(png) => self.asset(&png, at_ms)?,
                     None => None,
                 };
                 if let Some((asset, after)) = stored {
@@ -624,6 +637,14 @@ impl Writer {
 fn gray_l1(a: &[u8], b: &[u8]) -> f64 {
     let sum: u64 = a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64).sum();
     sum as f64 / a.len() as f64 / 255.0
+}
+
+/// A UUIDv7 (RFC 9562) whose time is `unix_ms`: every session, span and view is named by one,
+/// timed to the moment it describes, so rows from many stores merge without collisions.
+pub fn uuid7(unix_ms: i64) -> String {
+    let ms = unix_ms.max(0) as u64;
+    let ts = uuid::Timestamp::from_unix(uuid::NoContext, ms / 1000, ((ms % 1000) * 1_000_000) as u32);
+    uuid::Uuid::new_v7(ts).to_string()
 }
 
 fn unix_ms() -> i64 {
@@ -699,10 +720,15 @@ mod tests {
             std::fs::create_dir_all(dir).unwrap();
         }
         let conn = open_schema(path).unwrap();
-        conn.execute("INSERT INTO session (started_at) VALUES ('t')", []).unwrap();
+        let started_ms = unix_ms();
+        conn.execute(
+            "INSERT INTO session (uuid, started_at) VALUES (?1, ?2)",
+            params![uuid7(started_ms), civil_time(started_ms)],
+        )
+        .unwrap();
         let session = conn.last_insert_rowid();
         let (tx, rx) = mpsc::sync_channel(QUEUE_CAPACITY);
-        thread::spawn(move || Writer::new(conn, session, encoder).run(rx));
+        thread::spawn(move || Writer::new(conn, session, started_ms, encoder).run(rx));
         TraceStore {
             tx,
             epoch: Instant::now(),
@@ -942,6 +968,74 @@ mod tests {
         let mut other = before_rgb.clone();
         other[1000] ^= 1;
         assert!(rgb != other);
+    }
+
+    /// The Unix milliseconds a UUIDv7 carries, or `None` for a string that is not one.
+    fn v7_ms(text: &str) -> Option<i64> {
+        let u = uuid::Uuid::parse_str(text).ok()?;
+        (u.get_version_num() == 7 && u.get_variant() == uuid::Variant::RFC4122).then(|| {
+            let (secs, nanos) = u.get_timestamp()?.to_unix();
+            Some(secs as i64 * 1000 + nanos as i64 / 1_000_000)
+        })?
+    }
+
+    #[test]
+    fn sessions_spans_and_views_are_named_by_uuid7_at_their_moment() {
+        let path = temp_db("uuid7");
+        let store = open_with(&path, Box::new(FakeEncoder));
+        let s = store.begin("click", &json!({"pid": 1}), Some(png(64, 32, 10)));
+        store.end(s, true, Some(png(64, 32, 200)), None);
+        let t = store.begin("click", &json!({"pid": 2}), Some(png(64, 32, 10)));
+        store.end(t, true, Some(png(64, 32, 200)), None);
+        store.flush();
+        let conn = Connection::open(&path).unwrap();
+        let rows = |sql: &str| -> Vec<(String, String)> {
+            let mut st = conn.prepare(sql).unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect()
+        };
+        let session = rows("SELECT uuid, started_at FROM session");
+        let start = time::OffsetDateTime::parse(&session[0].1, &time::format_description::well_known::Rfc3339).unwrap();
+        let start_ms = (start.unix_timestamp_nanos() / 1_000_000) as i64;
+        assert_eq!(v7_ms(&session[0].0), Some(start_ms), "the session's UUIDv7 is its start");
+        let offset = |d: &str| -> i64 {
+            let secs: f64 = d.trim_start_matches("PT").trim_end_matches('S').parse().unwrap();
+            (secs * 1000.0).round() as i64
+        };
+        let spans = rows("SELECT uuid, started FROM span");
+        let views = rows(
+            "SELECT a.uuid, CASE r.name WHEN 'view_after' THEN e.ended ELSE s.started END \
+             FROM decider_input i JOIN input_role r USING (input_role_id) JOIN asset a ON a.asset_id = i.asset_id \
+             JOIN span s ON s.span_id = i.span_id JOIN span_end e ON e.span_id = s.span_id",
+        );
+        assert_eq!((spans.len(), views.len()), (2, 4));
+        for (uuid, at) in spans.iter().chain(views.iter()) {
+            assert_eq!(v7_ms(uuid), Some(start_ms + offset(at)), "{uuid} is timed to its row ({at})");
+        }
+        let mut all: Vec<&String> = session.iter().chain(&spans).chain(&views).map(|(u, _)| u).collect();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), 7, "every name is distinct");
+        // Controls: a v4 UUID and a non-UUID are refused, so the check above can fail.
+        assert_eq!(v7_ms(&uuid::Uuid::new_v4().to_string()), None);
+        assert_eq!(v7_ms("u"), None);
+    }
+
+    /// Writes a small real store for the decider tools' CI check (`tools/decider/`): JPEG XL views,
+    /// one confirmed example, one unverifiable, one with no view. Run with `--ignored` and
+    /// `CUA_TRACE_FIXTURE=<path>`.
+    #[test]
+    #[ignore]
+    fn writes_a_fixture_store_for_the_decider_tools() {
+        let path = PathBuf::from(std::env::var("CUA_TRACE_FIXTURE").expect("CUA_TRACE_FIXTURE"));
+        let _ = std::fs::remove_file(&path);
+        let store = open_with(&path, Box::new(Jxl));
+        let a = store.begin("set_value", &json!({"pid": 1, "value": "abc"}), Some(png(96, 64, 30)));
+        store.end(a, true, Some(png(96, 64, 220)), Some(ActionEffect::Confirmed));
+        let b = store.begin("click", &json!({"pid": 1, "x": 3}), Some(png(96, 64, 30)));
+        store.end(b, true, Some(png(96, 64, 30)), Some(ActionEffect::Unverifiable));
+        let c = store.begin("list_windows", &json!({}), None);
+        store.end(c, true, None, None);
+        store.flush();
     }
 
     #[test]

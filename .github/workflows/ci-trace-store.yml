@@ -1,0 +1,44 @@
+# The trace store and the decider tools built on it (RFD66606-2334). Runs on every pull request, with
+# no path filter, because it is a required check. No event text reaches a shell.
+name: ci-trace-store
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-trace-store-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  trace-store:
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: libs/cua-driver/rust
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Trace store tests
+        run: "cargo test --release -p cua-driver-core --lib trace::"
+
+      - name: Fixture store
+        run: >-
+          CUA_TRACE_FIXTURE="$RUNNER_TEMP/fixture.sqlite"
+          cargo test --release -p cua-driver-core --lib
+          trace::tests::writes_a_fixture_store_for_the_decider_tools -- --ignored
+
+      - name: Elixir
+        run: brew install elixir
+
+      - name: Build and check a sample from the fixture
+        working-directory: libs/cua-driver/tools/decider
+        run: |
+          elixir build_sample.exs "$RUNNER_TEMP/fixture.sqlite" "$RUNNER_TEMP/stage" 0 "$GITHUB_SHA"
+          elixir check_sample.exs "$RUNNER_TEMP/stage" "$RUNNER_TEMP/fixture.sqlite"
