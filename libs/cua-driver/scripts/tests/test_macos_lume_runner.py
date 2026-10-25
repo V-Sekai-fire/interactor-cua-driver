@@ -867,7 +867,7 @@ def test_run_rust_e2e_reads_binaries_from_the_configured_target_dir(tmp_path: Pa
     assert absolute.stdout.strip() == str(tmp_path / "t")
     assert relative.returncode == 2
     assert "must be absolute" in relative.stderr
-    assert 'CUA_TEST_DRIVER_BIN="${BUILD_TARGET_DIR}/release/cua-driver"' in RUN_RUST_E2E.read_text(
+    assert 'CUA_TEST_DRIVER_BIN="${BUILD_TARGET_DIR}/release/cua-tracer"' in RUN_RUST_E2E.read_text(
         encoding="utf-8"
     )
 
