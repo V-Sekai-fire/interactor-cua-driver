@@ -11,19 +11,18 @@
 //! leaves the question with no gold, so it never becomes a false label. Real-valued measures (the
 //! 8x8 gray change) are kept as measures, not turned into answers. The `decider_row` view yields one
 //! row per example and question.
-//! Views are PyroWave frames (asset kind `pyrowave`), as XR Pilot keeps its streamed frames: one
-//! packet holding the whole 4:2:0 frame, which XR Pilot's decoders read unchanged. The encoder is the
-//! `cua-tracer-pyrowave` sidecar next to this executable (Metal on macOS, Vulkan elsewhere), started
-//! once per session by the writer thread. There is no PNG fallback: a view the sidecar cannot encode
-//! is not kept, and the span stays a plain span.
+//!
+//! Views are lossless JPEG XL (ISO/IEC 18181, asset kind `jxl`): the window's 8-bit sRGB pixels
+//! exactly, tagged sRGB, at the window's own size, as XR Pilot keeps its frames. JPEG XL's bitstream
+//! is frozen, so a stored view stays readable. The writer thread encodes it in process. A view that
+//! does not decode or encode is not kept, and the span stays a plain span.
 //!
 //! Tracing never fails or delays the action it observes: events go to a bounded queue with
 //! `try_send`, and a writer thread owns the database. A full queue drops the event and counts it.
 //!
 //! On by default. `CUA_DRIVER_TRACE=off` turns it off; `CUA_DRIVER_TRACE=<path>` picks the file.
 //! The default file is `traces.sqlite` in the per-user data directory under `V-Sekai-fire/cua-tracer`
-//! (XR Pilot's is under `V-Sekai-fire/xr-pilot`). `CUA_DRIVER_TRACE_BPP` sets the PyroWave budget in
-//! bits per pixel (default [`DEFAULT_BPP`]); `CUA_DRIVER_TRACE_PYROWAVE` names the sidecar.
+//! (XR Pilot's is under `V-Sekai-fire/xr-pilot`).
 
 use std::{
     collections::HashMap,
@@ -43,8 +42,6 @@ use serde_json::Value;
 /// Bumped with XR Pilot's: an older store is moved aside, not altered.
 pub const SCHEMA_VERSION: i64 = 4;
 const QUEUE_CAPACITY: usize = 256;
-/// PyroWave budget for a view, bits per pixel of the even-padded frame.
-pub const DEFAULT_BPP: f64 = 1.0;
 
 /// The interned vocabularies, one relation each (XR Pilot's list).
 const VOCABULARIES: &[&str] = &["tool", "task_type", "input_role", "asset_kind", "metric"];
@@ -244,7 +241,7 @@ impl TraceStore {
         let epoch = Instant::now();
         thread::Builder::new()
             .name("cua-trace-writer".into())
-            .spawn(move || Writer::new(conn, session, Box::new(Sidecar::from_env())).run(rx))?;
+            .spawn(move || Writer::new(conn, session, Box::new(Jxl)).run(rx))?;
         Ok(Self {
             tx,
             epoch,
@@ -384,140 +381,56 @@ pub fn detail(args: &Value) -> String {
     }
 }
 
-/// Turns an even-sized RGBA8 frame into one PyroWave packet; `None` when it cannot.
+/// Turns an RGB8 frame (rows top to bottom, no padding) into one stored view; `None` when it cannot.
 pub trait ViewEncoder: Send {
-    fn encode(&mut self, width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>>;
+    fn encode(&mut self, width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>>;
 }
 
-/// The `cua-tracer-pyrowave` process, started on the first view and restarted after it fails.
-pub struct Sidecar {
-    path: PathBuf,
-    bpp: f64,
-    child: Option<(std::process::Child, std::process::ChildStdin, std::process::ChildStdout)>,
-    warned: bool,
-}
+/// Lossless JPEG XL: a bare codestream whose colour encoding is the default, sRGB.
+pub struct Jxl;
 
-impl Sidecar {
-    pub fn from_env() -> Self {
-        let name = if cfg!(windows) { "cua-tracer-pyrowave.exe" } else { "cua-tracer-pyrowave" };
-        let path = std::env::var_os("CUA_DRIVER_TRACE_PYROWAVE").map(PathBuf::from).unwrap_or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| std::fs::canonicalize(p).ok())
-                .and_then(|p| p.parent().map(|d| d.join(name)))
-                .unwrap_or_else(|| PathBuf::from(name))
-        });
-        let bpp = std::env::var("CUA_DRIVER_TRACE_BPP")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|v| *v > 0.0)
-            .unwrap_or(DEFAULT_BPP);
-        Self { path, bpp, child: None, warned: false }
-    }
-
-    fn start(&mut self) -> std::io::Result<()> {
-        use std::process::{Command, Stdio};
-        let mut child = Command::new(&self.path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let stdin = child.stdin.take().expect("piped");
-        let stdout = child.stdout.take().expect("piped");
-        self.child = Some((child, stdin, stdout));
-        Ok(())
-    }
-
-    fn round_trip(&mut self, width: u32, height: u32, rgba: &[u8]) -> std::io::Result<Vec<u8>> {
-        use std::io::{Read, Write};
-        if self.child.is_none() {
-            self.start()?;
-        }
-        let (_, stdin, stdout) = self.child.as_mut().expect("started");
-        let budget = ((width as f64 * height as f64 * self.bpp / 8.0) as u32).max(1);
-        let mut header = Vec::with_capacity(12);
-        for v in [width, height, budget] {
-            header.extend_from_slice(&v.to_le_bytes());
-        }
-        stdin.write_all(&header)?;
-        stdin.write_all(rgba)?;
-        stdin.flush()?;
-        let mut len = [0u8; 4];
-        stdout.read_exact(&mut len)?;
-        let mut packet = vec![0u8; u32::from_le_bytes(len) as usize];
-        stdout.read_exact(&mut packet)?;
-        Ok(packet)
-    }
-}
-
-impl ViewEncoder for Sidecar {
-    fn encode(&mut self, width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
-        match self.round_trip(width, height, rgba) {
-            Ok(packet) if !packet.is_empty() => Some(packet),
+impl ViewEncoder for Jxl {
+    fn encode(&mut self, width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>> {
+        use zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions};
+        let options = EncoderOptions::new(width as usize, height as usize, ColorSpace::RGB, BitDepth::Eight);
+        let mut out = Vec::new();
+        match zune_jpegxl::JxlSimpleEncoder::new(rgb, options).encode(&mut out) {
+            Ok(_) if !out.is_empty() => Some(out),
             Ok(_) => None,
             Err(error) => {
-                if let Some((mut child, _, _)) = self.child.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                if !self.warned {
-                    self.warned = true;
-                    tracing::warn!("trace views off until the sidecar works: {}: {error}", self.path.display());
-                }
+                tracing::warn!("trace view not kept: JPEG XL encode failed: {error:?}");
                 None
             }
         }
     }
 }
 
-impl Drop for Sidecar {
-    fn drop(&mut self) {
-        if let Some((mut child, stdin, _)) = self.child.take() {
-            drop(stdin); // EOF ends the sidecar's loop
-            let _ = child.wait();
-        }
-    }
-}
-
-/// A decoded view: the frame padded to even size for 4:2:0, and the 8x8 gray grid of the original.
+/// A decoded view: its RGB8 pixels, and the 8x8 gray grid a span's measure compares.
 struct Frame {
     width: u32,
     height: u32,
-    rgba: Vec<u8>,
+    rgb: Vec<u8>,
     thumb: Vec<u8>,
 }
 
 fn frame(png: &[u8]) -> Option<Frame> {
-    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
-    let (w, h) = img.dimensions();
-    if w < 2 || h < 2 {
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgb8();
+    let (width, height) = img.dimensions();
+    if width == 0 || height == 0 {
         return None;
     }
     let mut thumb = Vec::new();
     let mut y = 0;
-    while y + 8 <= h {
+    while y + 8 <= height {
         let mut x = 0;
-        while x + 8 <= w {
+        while x + 8 <= width {
             let p = img.get_pixel(x, y).0;
             thumb.push(((p[0] as u32 + 2 * p[1] as u32 + p[2] as u32) / 4) as u8);
             x += 8;
         }
         y += 8;
     }
-    let (pw, ph) = (w + (w & 1), h + (h & 1));
-    let mut rgba = vec![0u8; (pw * ph * 4) as usize];
-    let src = img.as_raw();
-    for row in 0..ph {
-        let from = row.min(h - 1) as usize * w as usize * 4; // repeat the edge row and column
-        let to = row as usize * pw as usize * 4;
-        rgba[to..to + w as usize * 4].copy_from_slice(&src[from..from + w as usize * 4]);
-        if pw != w {
-            let last = to + (w as usize - 1) * 4;
-            let (head, tail) = rgba.split_at_mut(last + 4);
-            tail[..4].copy_from_slice(&head[last..last + 4]);
-        }
-    }
-    Some(Frame { width: pw, height: ph, rgba, thumb })
+    Some(Frame { width, height, rgb: img.into_raw(), thumb })
 }
 
 struct Writer {
@@ -591,12 +504,12 @@ impl Writer {
         Ok(id)
     }
 
-    /// Stores a view as a PyroWave frame with its encoded extent; `None` when it does not decode or
-    /// encode, so no row points at a view that is not there.
+    /// Stores a view as lossless JPEG XL with its extent; `None` when it does not decode or encode,
+    /// so no row points at a view that is not there.
     fn asset(&mut self, png: &[u8]) -> rusqlite::Result<Option<(i64, (u32, u32, Vec<u8>))>> {
         let Some(f) = frame(png) else { return Ok(None) };
-        let Some(packet) = self.encoder.encode(f.width, f.height, &f.rgba) else { return Ok(None) };
-        let kind = self.intern("asset_kind", "pyrowave")?;
+        let Some(packet) = self.encoder.encode(f.width, f.height, &f.rgb) else { return Ok(None) };
+        let kind = self.intern("asset_kind", "jxl")?;
         self.conn
             .execute("INSERT INTO asset (asset_kind_id, bytes) VALUES (?1, ?2)", params![kind, packet])?;
         let id = self.conn.last_insert_rowid();
@@ -766,13 +679,12 @@ mod tests {
         out.into_inner()
     }
 
-    /// Stands in for the GPU: a "packet" that records the extent and the first pixel.
+    /// Stands in for the encoder: a "view" that records the extent and the first pixel.
     struct FakeEncoder;
     impl ViewEncoder for FakeEncoder {
-        fn encode(&mut self, w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
-            assert_eq!(rgba.len(), (w * h * 4) as usize);
-            assert!(w % 2 == 0 && h % 2 == 0, "4:2:0 needs even extents");
-            Some([&w.to_le_bytes()[..], &h.to_le_bytes()[..], &rgba[..4]].concat())
+        fn encode(&mut self, w: u32, h: u32, rgb: &[u8]) -> Option<Vec<u8>> {
+            assert_eq!(rgb.len(), (w * h * 3) as usize);
+            Some([&w.to_le_bytes()[..], &h.to_le_bytes()[..], &rgb[..3]].concat())
         }
     }
     struct FailingEncoder;
@@ -891,7 +803,7 @@ mod tests {
             .collect();
         assert_eq!(roles, vec!["view_after".to_string(), "view_before".to_string()]);
         let score: f64 = conn.query_row("SELECT value FROM decider_measure", [], |r| r.get(0)).unwrap();
-        // Views are PyroWave frames at the even-padded extent, never PNG.
+        // Views are JPEG XL, never PNG.
         let kinds: Vec<String> = conn
             .prepare("SELECT DISTINCT k.name FROM asset JOIN asset_kind k USING (asset_kind_id)")
             .unwrap()
@@ -899,7 +811,7 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert_eq!(kinds, vec!["pyrowave".to_string()]);
+        assert_eq!(kinds, vec!["jxl".to_string()]);
         assert!((score - 190.0 / 255.0).abs() < 1e-9, "score {score}");
         // The ETNF rule XR Pilot checks: no column anywhere holds a NULL.
         for table in ["span", "span_detail", "span_parent", "span_end", "asset", "asset_extent", "question",
@@ -953,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn odd_windows_are_padded_and_a_failed_encode_keeps_no_view() {
+    fn odd_windows_keep_their_size_and_a_failed_encode_keeps_no_view() {
         let path = temp_db("odd");
         let store = open_with(&path, Box::new(FakeEncoder));
         let s = store.begin("click", &json!({"pid": 1}), Some(png(673, 439, 50)));
@@ -962,7 +874,7 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         let extent: (i64, i64) =
             conn.query_row("SELECT width, height FROM asset_extent LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!(extent, (674, 440));
+        assert_eq!(extent, (673, 439));
 
         // A control: the same calls with an encoder that fails leave plain spans and no assets.
         let path = temp_db("fail");
@@ -979,6 +891,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!(counts, (0, 0, 1));
+    }
+
+    /// The pixels of an image that is not flat: every pixel differs from its neighbours.
+    fn noise_png(w: u32, h: u32) -> (Vec<u8>, Vec<u8>) {
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            let v = x.wrapping_mul(2654435761).wrapping_add(y.wrapping_mul(40503));
+            image::Rgb([v as u8, (v >> 8) as u8, (v >> 16) as u8])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        (out.into_inner(), img.into_raw())
+    }
+
+    fn jxl_decode(bytes: &[u8]) -> (u32, u32, String, Vec<u8>) {
+        let image = jxl_oxide::JxlImage::builder().read(std::io::Cursor::new(bytes)).unwrap();
+        let colour = format!("{:?}", image.image_header().metadata.colour_encoding);
+        let (w, h) = (image.width(), image.height());
+        let frame = image.render_frame(0).unwrap();
+        let rgb = frame.image_all_channels().buf().iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8).collect();
+        (w, h, colour, rgb)
+    }
+
+    #[test]
+    fn a_stored_view_decodes_to_the_same_pixels_tagged_srgb() {
+        let path = temp_db("jxl");
+        let store = open_with(&path, Box::new(Jxl));
+        let (before, before_rgb) = noise_png(673, 439);
+        let (after, _) = noise_png(673, 439);
+        let s = store.begin("click", &json!({"pid": 1}), Some(before));
+        store.end(s, true, Some(after), None);
+        store.flush();
+        let conn = Connection::open(&path).unwrap();
+        let bytes: Vec<u8> = conn
+            .query_row(
+                "SELECT a.bytes FROM decider_input i JOIN input_role r USING (input_role_id) \
+                 JOIN asset a ON a.asset_id = i.asset_id WHERE r.name = 'view_before'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // A JPEG XL bare codestream starts with FF 0A (ISO/IEC 18181-1).
+        assert_eq!(&bytes[..2], &[0xff, 0x0a]);
+        let (w, h, colour, rgb) = jxl_decode(&bytes);
+        assert_eq!((w, h), (673, 439));
+        assert!(colour.contains("primaries: Srgb") && colour.contains("tf: Srgb"), "{colour}");
+        assert_eq!(rgb.len(), before_rgb.len());
+        assert!(rgb == before_rgb, "lossless: every pixel comes back");
+        // A control: one changed bit is seen, so the equality above can fail.
+        let mut other = before_rgb.clone();
+        other[1000] ^= 1;
+        assert!(rgb != other);
     }
 
     #[test]

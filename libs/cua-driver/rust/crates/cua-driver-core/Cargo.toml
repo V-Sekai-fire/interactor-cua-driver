@@ -35,6 +35,8 @@ image = { workspace = true }
 # intentionally direct so SDK consumers without this workspace lockfile cannot
 # resolve the incompatible zune-core 0.5.2 release.
 zune-core = { workspace = true }
+# Trace views are stored as lossless JPEG XL (ISO/IEC 18181), a frozen format: pure Rust encoder.
+zune-jpegxl = "0.5"
 # Used by the `browser` module's pooled CDP browser-endpoint WebSocket.
 # Same versions platform-macos already depends on, to avoid duplicate
 # crate versions in the workspace graph. No TLS features: the endpoint
@@ -80,3 +82,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+# Decodes trace views in tests, independently of the encoder.
+jxl-oxide = "0.12"
