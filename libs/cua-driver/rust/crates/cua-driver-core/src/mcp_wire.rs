@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(result["cacheScope"], "private");
         assert_eq!(
             result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
-            "cua-driver"
+            "cua-tracer"
         );
         assert!(result.get("serverInfo").is_none());
         let structured = json!({"resultType": "domain-value", "private": [1, 2]});

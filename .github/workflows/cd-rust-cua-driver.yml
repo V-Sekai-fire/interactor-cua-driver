@@ -301,7 +301,7 @@ jobs:
           TARGET="${{ matrix.target }}"
           STAGE="cua-driver-rs-${VERSION}-${LABEL}"
           mkdir -p "release/${STAGE}"
-          cp "target/${TARGET}/release/cua-driver" "release/${STAGE}/"
+          cp "target/${TARGET}/release/cua-tracer" "release/${STAGE}/"
           cp "target/${TARGET}/release/cua-cursor-theme" "release/${STAGE}/"
           cp "target/${TARGET}/release/libcua_driver_sdk.so" "release/${STAGE}/"
           cp "target/${TARGET}/release/cua_driver_node_runtime.node" "release/${STAGE}/"
@@ -455,7 +455,7 @@ jobs:
         run: |
           $target = "${{ matrix.target }}"
           $files = @(
-            "target/$target/release/cua-driver.exe",
+            "target/$target/release/cua-tracer.exe",
             "target/$target/release/cua-cursor-theme.exe",
             "target/$target/release/cua-driver-uia.exe",
             "target/$target/release/cua_driver_sdk.dll",
@@ -480,7 +480,7 @@ jobs:
           $target  = "${{ matrix.target }}"
           $stage   = "cua-driver-rs-${version}-${label}"
           New-Item -ItemType Directory -Force -Path "release/$stage" | Out-Null
-          Copy-Item "target/$target/release/cua-driver.exe" "release/$stage/"
+          Copy-Item "target/$target/release/cua-tracer.exe" "release/$stage/"
           Copy-Item "target/$target/release/cua-cursor-theme.exe" "release/$stage/"
           Copy-Item "target/$target/release/cua-driver-uia.exe" "release/$stage/"
           Copy-Item "target/$target/release/cua_driver_sdk.dll" "release/$stage/"
@@ -739,8 +739,8 @@ jobs:
       - name: Create universal binary (lipo)
         working-directory: libs/cua-driver/rust
         run: |
-          ARM64="target/aarch64-apple-darwin/release/cua-driver"
-          X86="target/x86_64-apple-darwin/release/cua-driver"
+          ARM64="target/aarch64-apple-darwin/release/cua-tracer"
+          X86="target/x86_64-apple-darwin/release/cua-tracer"
           THEME_ARM64="target/aarch64-apple-darwin/release/cua-cursor-theme"
           THEME_X86="target/x86_64-apple-darwin/release/cua-cursor-theme"
           SDK_ARM64="target/aarch64-apple-darwin/release/libcua_driver_sdk.dylib"

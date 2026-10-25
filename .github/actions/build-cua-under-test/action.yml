@@ -74,7 +74,7 @@ runs:
               echo "cua-spacesd=$PWD/libs/cua-spacesd/target/release/cua-spacesd" >>"$GITHUB_OUTPUT" ;;
             cua-driver)
               (cd libs/cua-driver/rust && cargo build --release --locked -p cua-driver)
-              echo "cua-driver=$PWD/libs/cua-driver/rust/target/release/cua-driver" >>"$GITHUB_OUTPUT" ;;
+              echo "cua-driver=$PWD/libs/cua-driver/rust/target/release/cua-tracer" >>"$GITHUB_OUTPUT" ;;
             *) echo "::error::unknown component $c"; exit 1 ;;
           esac
         done

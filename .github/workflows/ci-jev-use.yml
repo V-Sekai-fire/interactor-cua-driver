@@ -112,7 +112,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      CUA_DRIVER_BIN: ${{ github.workspace }}/libs/cua-driver/rust/target/release/cua-driver
+      CUA_DRIVER_BIN: ${{ github.workspace }}/libs/cua-driver/rust/target/release/cua-tracer
       CUA_DRIVER_PERMISSION_MODE: unrestricted
       CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS: "1"
       CUA_E2E_BROWSER_NO_SANDBOX: "1"

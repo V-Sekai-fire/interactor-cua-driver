@@ -69,7 +69,7 @@ jobs:
           CUA_DRIVER_RS_UPDATE_CHECK: "false"
           NO_AT_BRIDGE: "1"
           CUA_VALGRIND_ARTIFACT_DIR: ${{ runner.temp }}/cua-driver-valgrind
-        run: dbus-run-session -- xvfb-run -a uv run --script scripts/ci/linux/run-valgrind-e2e.py libs/cua-driver/rust/target/debug/cua-driver
+        run: dbus-run-session -- xvfb-run -a uv run --script scripts/ci/linux/run-valgrind-e2e.py libs/cua-driver/rust/target/debug/cua-tracer
       - name: Upload Memcheck diagnostics
         if: failure()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4

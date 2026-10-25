@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-DRIVER_BIN="${CUA_TEST_DRIVER_BIN:-${REPO_ROOT}/libs/cua-driver/rust/target/release/cua-driver}"
+DRIVER_BIN="${CUA_TEST_DRIVER_BIN:-${REPO_ROOT}/libs/cua-driver/rust/target/release/cua-tracer}"
 FAILURES=0
 
 pass() { printf '[ready] %s\n' "$1"; }

@@ -10,7 +10,7 @@ fn main() {
         .unwrap()
         .parent()
         .unwrap()
-        .join("target/debug/cua-driver.exe");
+        .join("target/debug/cua-tracer.exe");
 
     // 1. Default: --type=all → {cli, mcp}.
     let out = Command::new(&exe).arg("dump-docs").output().expect("run");

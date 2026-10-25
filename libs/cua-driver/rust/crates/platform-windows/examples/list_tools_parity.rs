@@ -15,7 +15,7 @@ fn main() {
         .unwrap()
         .parent()
         .unwrap()
-        .join("target/debug/cua-driver.exe");
+        .join("target/debug/cua-tracer.exe");
     let out = Command::new(&exe)
         .arg("list-tools")
         .output()
