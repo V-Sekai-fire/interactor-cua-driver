@@ -179,6 +179,8 @@ enum Event {
         effect: Option<crate::action_record::ActionEffect>,
     },
     Flush(SyncSender<()>),
+    /// Write what is queued, close the database, and stop the writer.
+    Close(SyncSender<()>),
 }
 
 /// A span begun and not yet ended; hand it back to [`TraceStore::end`].
@@ -194,6 +196,8 @@ pub struct TraceStore {
     running: Mutex<Vec<u64>>,
     dropped: AtomicU64,
     path: PathBuf,
+    /// The writer thread, joined by [`TraceStore::close`].
+    writer: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 static GLOBAL: OnceLock<Option<TraceStore>> = OnceLock::new();
@@ -214,8 +218,9 @@ pub fn global() -> Option<&'static TraceStore> {
             match TraceStore::open(&path) {
                 Ok(store) => {
                     // Spans still in the queue when the process exits (stdin EOF, process::exit)
-                    // would be lost, so drain them at exit. The writer thread is still alive then.
-                    unsafe { libc::atexit(flush_at_exit) };
+                    // would be lost, so write them at exit, then stop the writer: it closes the
+                    // database and frees what it holds before the process goes.
+                    unsafe { libc::atexit(close_at_exit) };
                     Some(store)
                 }
                 Err(error) => {
@@ -227,9 +232,9 @@ pub fn global() -> Option<&'static TraceStore> {
         .as_ref()
 }
 
-extern "C" fn flush_at_exit() {
+extern "C" fn close_at_exit() {
     if let Some(Some(store)) = GLOBAL.get() {
-        store.flush();
+        store.close();
     }
 }
 
@@ -248,7 +253,7 @@ impl TraceStore {
         )?;
         let session = conn.last_insert_rowid();
         let (tx, rx) = mpsc::sync_channel(QUEUE_CAPACITY);
-        thread::Builder::new()
+        let writer = thread::Builder::new()
             .name("cua-trace-writer".into())
             .spawn(move || Writer::new(conn, session, started_ms, Box::new(Jxl)).run(rx))?;
         Ok(Self {
@@ -258,6 +263,7 @@ impl TraceStore {
             running: Mutex::new(Vec::new()),
             dropped: AtomicU64::new(0),
             path: path.to_path_buf(),
+            writer: Mutex::new(Some(writer)),
         })
     }
 
@@ -331,6 +337,20 @@ impl TraceStore {
         if self.tx.send(Event::Flush(tx)).is_ok() {
             let _ = rx.recv();
         }
+    }
+
+    /// Writes every queued event, closes the database and joins the writer thread. Later events are
+    /// counted as dropped. Called at process exit; calling it again does nothing.
+    pub fn close(&self) {
+        let Some(writer) = self.writer.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            return;
+        };
+        let (done, wait) = mpsc::sync_channel(1);
+        // A blocking send: the close must not be dropped when the queue is full.
+        if self.tx.send(Event::Close(done)).is_ok() {
+            let _ = wait.recv();
+        }
+        let _ = writer.join();
     }
 }
 
@@ -489,6 +509,12 @@ impl Writer {
                 Event::Flush(done) => {
                     let _ = done.send(());
                     Ok(())
+                }
+                Event::Close(done) => {
+                    // Events queued before the close are already written: the queue is in order.
+                    drop(self);
+                    let _ = done.send(());
+                    return;
                 }
                 event => self.write(event),
             };
@@ -680,7 +706,7 @@ impl Writer {
                     }
                 }
             }
-            Event::Flush(_) => {}
+            Event::Flush(_) | Event::Close(_) => {}
         }
         Ok(())
     }
@@ -790,7 +816,7 @@ mod tests {
         .unwrap();
         let session = conn.last_insert_rowid();
         let (tx, rx) = mpsc::sync_channel(QUEUE_CAPACITY);
-        thread::spawn(move || Writer::new(conn, session, started_ms, encoder).run(rx));
+        let writer = thread::spawn(move || Writer::new(conn, session, started_ms, encoder).run(rx));
         TraceStore {
             tx,
             epoch: Instant::now(),
@@ -798,6 +824,7 @@ mod tests {
             running: Mutex::new(Vec::new()),
             dropped: AtomicU64::new(0),
             path: path.to_path_buf(),
+            writer: Mutex::new(Some(writer)),
         }
     }
 
@@ -1211,6 +1238,35 @@ mod tests {
         let c = store.begin("list_windows", &json!({}), None);
         store.end(c, true, None, None);
         store.flush();
+    }
+
+    #[test]
+    fn close_writes_the_queue_stops_the_writer_and_drops_later_events() {
+        let path = temp_db("close");
+        let store = open_with(&path, Box::new(FakeEncoder));
+        for i in 0..50 {
+            let s = store.begin("click", &json!({ "pid": i }), None);
+            store.end(s, true, None, None);
+        }
+        store.close();
+        assert!(
+            store.writer.lock().unwrap().is_none(),
+            "the writer is joined"
+        );
+        let conn = Connection::open(&path).unwrap();
+        let ended: i64 = conn
+            .query_row("SELECT count(*) FROM span_end", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ended, 50, "every span queued before the close is written");
+        // After the close nothing more is written, and the events are counted.
+        let late = store.begin("click", &json!({}), None);
+        store.end(late, true, None, None);
+        assert_eq!(store.dropped(), 2);
+        store.close();
+        let spans: i64 = conn
+            .query_row("SELECT count(*) FROM span", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(spans, 50);
     }
 
     #[test]
