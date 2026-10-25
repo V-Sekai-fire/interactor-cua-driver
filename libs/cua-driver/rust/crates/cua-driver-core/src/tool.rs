@@ -2403,7 +2403,8 @@ impl ToolRegistry {
 
         if let (Some(store), Some(span)) = (crate::trace::global(), trace_span) {
             let view = trace_target.and_then(|(w, p)| screenshot_for(w, p));
-            store.end(span, result.is_error != Some(true), view);
+            let effect = result.action_record.as_ref().map(|r| r.effect);
+            store.end(span, result.is_error != Some(true), view, effect);
         }
         if let (Some(history), Some(pending)) = (self.history.as_ref(), pending_history) {
             history.finish_action(

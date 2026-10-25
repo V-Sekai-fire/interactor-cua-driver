@@ -1,24 +1,28 @@
 //! Every tool call as a span, kept in SQLite in the schema XR Pilot's `TraceStore` writes
-//! (V-Sekai-fire/interactor-xr-pilot `core/src/TraceStore.cpp`, schema version 3), so the same readers
+//! (V-Sekai-fire/interactor-xr-pilot `core/src/TraceStore.cpp`, schema version 4), so the same readers
 //! work on both. The store is in Essential Tuple Normal Form: facts that may be missing (an end, a
-//! parent, a detail, a score, an image's extent) are satellite relations, never nullable columns.
+//! parent, a detail, a gold answer, a measure, an image's extent) are satellite relations, never
+//! nullable columns.
 //!
-//! A span that acts on a window is also a MaskScore row: its input is the target window before the
-//! call (`source_view`), its candidate the window after it (axis `view`, kind `after_span`), and its
-//! instruction the tool and its arguments, so the `editscore_pair` view yields EditScore triples.
-//! Views are PyroWave frames (asset kind `pyrowave`), as XR Pilot keeps its streamed frames: one
-//! packet holding the whole 4:2:0 frame, which XR Pilot's decoders read unchanged. The encoder is the
-//! `cua-tracer-pyrowave` sidecar next to this executable (Metal on macOS, Vulkan elsewhere), started
-//! once per session by the writer thread. There is no PNG fallback: a view the sidecar cannot encode
-//! is not kept, and the span stays a plain span.
+//! A span that acts on a window is also a decider example, the shape of chibifire/edscore-decider:
+//! a state (the tool and its arguments), the window before and after the call (inputs `view_before`,
+//! `view_after`), and typed Choice questions. A question's gold answer is kept only when the driver
+//! measured it: the `effect` question takes the action record's effect, and an `unverifiable` effect
+//! leaves the question with no gold, so it never becomes a false label. Real-valued measures (the
+//! 8x8 gray change) are kept as measures, not turned into answers. The `decider_row` view yields one
+//! row per example and question.
+//!
+//! Views are lossless JPEG XL (ISO/IEC 18181, asset kind `jxl`): the window's 8-bit sRGB pixels
+//! exactly, tagged sRGB, at the window's own size, as XR Pilot keeps its frames. JPEG XL's bitstream
+//! is frozen, so a stored view stays readable. The writer thread encodes it in process. A view that
+//! does not decode or encode is not kept, and the span stays a plain span.
 //!
 //! Tracing never fails or delays the action it observes: events go to a bounded queue with
 //! `try_send`, and a writer thread owns the database. A full queue drops the event and counts it.
 //!
 //! On by default. `CUA_DRIVER_TRACE=off` turns it off; `CUA_DRIVER_TRACE=<path>` picks the file.
 //! The default file is `traces.sqlite` in the per-user data directory under `V-Sekai-fire/cua-tracer`
-//! (XR Pilot's is under `V-Sekai-fire/xr-pilot`). `CUA_DRIVER_TRACE_BPP` sets the PyroWave budget in
-//! bits per pixel (default [`DEFAULT_BPP`]); `CUA_DRIVER_TRACE_PYROWAVE` names the sidecar.
+//! (XR Pilot's is under `V-Sekai-fire/xr-pilot`).
 
 use std::{
     collections::HashMap,
@@ -36,22 +40,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 /// Bumped with XR Pilot's: an older store is moved aside, not altered.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 const QUEUE_CAPACITY: usize = 256;
-/// PyroWave budget for a view, bits per pixel of the even-padded frame.
-pub const DEFAULT_BPP: f64 = 1.0;
 
 /// The interned vocabularies, one relation each (XR Pilot's list).
-const VOCABULARIES: &[&str] = &[
-    "tool",
-    "task_type",
-    "dimension",
-    "input_column",
-    "asset_kind",
-    "candidate_axis",
-    "candidate_kind",
-    "metric",
-];
+const VOCABULARIES: &[&str] = &["tool", "task_type", "input_role", "asset_kind", "metric"];
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS session (
@@ -88,46 +81,78 @@ CREATE TABLE IF NOT EXISTS asset_extent (
     asset_id INTEGER PRIMARY KEY REFERENCES asset,
     width INTEGER NOT NULL,
     height INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS maskscore_root (
+CREATE TABLE IF NOT EXISTS question (
+    question_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    text TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS question_option (
+    question_id INTEGER NOT NULL REFERENCES question,
+    option_index INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    PRIMARY KEY (question_id, option_index),
+    UNIQUE (question_id, label));
+CREATE TABLE IF NOT EXISTS decider_example (
     span_id INTEGER PRIMARY KEY REFERENCES span,
-    task_type_id INTEGER NOT NULL REFERENCES task_type,
-    dimension_id INTEGER NOT NULL REFERENCES dimension);
-CREATE TABLE IF NOT EXISTS maskscore_input (
-    span_id INTEGER NOT NULL REFERENCES maskscore_root,
-    input_column_id INTEGER NOT NULL REFERENCES input_column,
-    input_asset_id INTEGER NOT NULL REFERENCES asset,
-    PRIMARY KEY (span_id, input_column_id));
-CREATE TABLE IF NOT EXISTS maskscore_candidate (
-    span_id INTEGER NOT NULL REFERENCES maskscore_root,
-    candidate_axis_id INTEGER NOT NULL REFERENCES candidate_axis,
-    rank INTEGER NOT NULL,
-    candidate_asset_id INTEGER NOT NULL REFERENCES asset,
-    candidate_kind_id INTEGER NOT NULL REFERENCES candidate_kind,
-    PRIMARY KEY (span_id, candidate_axis_id, rank));
-CREATE TABLE IF NOT EXISTS maskscore_score (
+    task_type_id INTEGER NOT NULL REFERENCES task_type);
+CREATE TABLE IF NOT EXISTS decider_input (
+    span_id INTEGER NOT NULL REFERENCES decider_example,
+    input_role_id INTEGER NOT NULL REFERENCES input_role,
+    asset_id INTEGER NOT NULL REFERENCES asset,
+    PRIMARY KEY (span_id, input_role_id));
+CREATE TABLE IF NOT EXISTS decider_question (
+    span_id INTEGER NOT NULL REFERENCES decider_example,
+    question_id INTEGER NOT NULL REFERENCES question,
+    PRIMARY KEY (span_id, question_id));
+CREATE TABLE IF NOT EXISTS decider_gold (
     span_id INTEGER NOT NULL,
-    candidate_axis_id INTEGER NOT NULL,
-    rank INTEGER NOT NULL,
+    question_id INTEGER NOT NULL,
+    option_index INTEGER NOT NULL,
+    PRIMARY KEY (span_id, question_id),
+    FOREIGN KEY (span_id, question_id) REFERENCES decider_question,
+    FOREIGN KEY (question_id, option_index) REFERENCES question_option);
+CREATE TABLE IF NOT EXISTS decider_measure (
+    span_id INTEGER NOT NULL REFERENCES decider_example,
     metric_id INTEGER NOT NULL REFERENCES metric,
-    metric_value REAL NOT NULL,
-    PRIMARY KEY (span_id, candidate_axis_id, rank, metric_id),
-    FOREIGN KEY (span_id, candidate_axis_id, rank) REFERENCES maskscore_candidate);
-CREATE VIEW IF NOT EXISTS editscore_pair AS
-SELECT r.span_id, s.session_id, sk.name AS source_kind, src.bytes AS source, ek.name AS edited_kind,
-       ed.bytes AS edited, t.name || COALESCE(' ' || d.detail, '') AS instruction
-FROM maskscore_root r
+    value REAL NOT NULL,
+    PRIMARY KEY (span_id, metric_id));
+-- One row per example and question: the state, the question, its options in order, and the gold
+-- answer's label where one was measured (gold is NULL here only because the view outer-joins).
+CREATE VIEW IF NOT EXISTS decider_row AS
+SELECT e.span_id, s.session_id, tt.name AS task_type,
+       t.name || COALESCE(' ' || d.detail, '') AS state,
+       q.name AS question, q.text AS question_text,
+       (SELECT json_group_array(label) FROM
+           (SELECT label FROM question_option o WHERE o.question_id = q.question_id ORDER BY option_index))
+           AS options,
+       go.label AS gold
+FROM decider_example e
 JOIN span s USING (span_id)
 JOIN tool t USING (tool_id)
+JOIN task_type tt USING (task_type_id)
 LEFT JOIN span_detail d USING (span_id)
-JOIN maskscore_input i ON i.span_id = r.span_id
-JOIN input_column ic ON ic.input_column_id = i.input_column_id AND ic.name = 'source_view'
-JOIN asset src ON src.asset_id = i.input_asset_id
-JOIN asset_kind sk ON sk.asset_kind_id = src.asset_kind_id
-JOIN maskscore_candidate c ON c.span_id = r.span_id AND c.rank = 1
-JOIN candidate_axis ca ON ca.candidate_axis_id = c.candidate_axis_id AND ca.name = 'view'
-JOIN asset ed ON ed.asset_id = c.candidate_asset_id
-JOIN asset_kind ek ON ek.asset_kind_id = ed.asset_kind_id;
+JOIN decider_question dq ON dq.span_id = e.span_id
+JOIN question q ON q.question_id = dq.question_id
+LEFT JOIN decider_gold g ON g.span_id = dq.span_id AND g.question_id = dq.question_id
+LEFT JOIN question_option go ON go.question_id = g.question_id AND go.option_index = g.option_index;
 "#;
+
+/// The `effect` question: what the action did to the window. Its options are the driver's measured
+/// effects; `unverifiable` is not an option, because it says the driver could not tell.
+pub const EFFECT_QUESTION: &str = "effect";
+const EFFECT_TEXT: &str = "What did the action do to the window?";
+pub const EFFECT_OPTIONS: &[&str] = &["confirmed", "partial", "suspected_noop", "refused"];
+
+/// The gold option for an effect, or `None` when the effect is not a measured answer.
+pub fn effect_gold(effect: crate::action_record::ActionEffect) -> Option<&'static str> {
+    use crate::action_record::ActionEffect::*;
+    match effect {
+        Confirmed => Some("confirmed"),
+        Partial => Some("partial"),
+        SuspectedNoop => Some("suspected_noop"),
+        Refused => Some("refused"),
+        Unverifiable => None,
+    }
+}
 
 /// Argument keys whose values are what a person typed or pasted; the trace keeps their length only,
 /// so a password typed through `type_text` never lands in the store.
@@ -147,6 +172,8 @@ enum Event {
         ok: bool,
         at_ms: i64,
         view: Option<Vec<u8>>,
+        /// The action record's effect, when the tool produced one.
+        effect: Option<crate::action_record::ActionEffect>,
     },
     Flush(SyncSender<()>),
 }
@@ -214,7 +241,7 @@ impl TraceStore {
         let epoch = Instant::now();
         thread::Builder::new()
             .name("cua-trace-writer".into())
-            .spawn(move || Writer::new(conn, session, Box::new(Sidecar::from_env())).run(rx))?;
+            .spawn(move || Writer::new(conn, session, Box::new(Jxl)).run(rx))?;
         Ok(Self {
             tx,
             epoch,
@@ -268,8 +295,14 @@ impl TraceStore {
         OpenSpan { key }
     }
 
-    /// Ends a span; `view` is the target window after the call.
-    pub fn end(&self, span: OpenSpan, ok: bool, view: Option<Vec<u8>>) {
+    /// Ends a span; `view` is the target window after the call, `effect` the action record's effect.
+    pub fn end(
+        &self,
+        span: OpenSpan,
+        ok: bool,
+        view: Option<Vec<u8>>,
+        effect: Option<crate::action_record::ActionEffect>,
+    ) {
         {
             let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
             running.retain(|k| *k != span.key);
@@ -279,6 +312,7 @@ impl TraceStore {
             ok,
             at_ms: self.now_ms(),
             view,
+            effect,
         });
     }
 
@@ -347,140 +381,56 @@ pub fn detail(args: &Value) -> String {
     }
 }
 
-/// Turns an even-sized RGBA8 frame into one PyroWave packet; `None` when it cannot.
+/// Turns an RGB8 frame (rows top to bottom, no padding) into one stored view; `None` when it cannot.
 pub trait ViewEncoder: Send {
-    fn encode(&mut self, width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>>;
+    fn encode(&mut self, width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>>;
 }
 
-/// The `cua-tracer-pyrowave` process, started on the first view and restarted after it fails.
-pub struct Sidecar {
-    path: PathBuf,
-    bpp: f64,
-    child: Option<(std::process::Child, std::process::ChildStdin, std::process::ChildStdout)>,
-    warned: bool,
-}
+/// Lossless JPEG XL: a bare codestream whose colour encoding is the default, sRGB.
+pub struct Jxl;
 
-impl Sidecar {
-    pub fn from_env() -> Self {
-        let name = if cfg!(windows) { "cua-tracer-pyrowave.exe" } else { "cua-tracer-pyrowave" };
-        let path = std::env::var_os("CUA_DRIVER_TRACE_PYROWAVE").map(PathBuf::from).unwrap_or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| std::fs::canonicalize(p).ok())
-                .and_then(|p| p.parent().map(|d| d.join(name)))
-                .unwrap_or_else(|| PathBuf::from(name))
-        });
-        let bpp = std::env::var("CUA_DRIVER_TRACE_BPP")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|v| *v > 0.0)
-            .unwrap_or(DEFAULT_BPP);
-        Self { path, bpp, child: None, warned: false }
-    }
-
-    fn start(&mut self) -> std::io::Result<()> {
-        use std::process::{Command, Stdio};
-        let mut child = Command::new(&self.path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let stdin = child.stdin.take().expect("piped");
-        let stdout = child.stdout.take().expect("piped");
-        self.child = Some((child, stdin, stdout));
-        Ok(())
-    }
-
-    fn round_trip(&mut self, width: u32, height: u32, rgba: &[u8]) -> std::io::Result<Vec<u8>> {
-        use std::io::{Read, Write};
-        if self.child.is_none() {
-            self.start()?;
-        }
-        let (_, stdin, stdout) = self.child.as_mut().expect("started");
-        let budget = ((width as f64 * height as f64 * self.bpp / 8.0) as u32).max(1);
-        let mut header = Vec::with_capacity(12);
-        for v in [width, height, budget] {
-            header.extend_from_slice(&v.to_le_bytes());
-        }
-        stdin.write_all(&header)?;
-        stdin.write_all(rgba)?;
-        stdin.flush()?;
-        let mut len = [0u8; 4];
-        stdout.read_exact(&mut len)?;
-        let mut packet = vec![0u8; u32::from_le_bytes(len) as usize];
-        stdout.read_exact(&mut packet)?;
-        Ok(packet)
-    }
-}
-
-impl ViewEncoder for Sidecar {
-    fn encode(&mut self, width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
-        match self.round_trip(width, height, rgba) {
-            Ok(packet) if !packet.is_empty() => Some(packet),
+impl ViewEncoder for Jxl {
+    fn encode(&mut self, width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>> {
+        use zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions};
+        let options = EncoderOptions::new(width as usize, height as usize, ColorSpace::RGB, BitDepth::Eight);
+        let mut out = Vec::new();
+        match zune_jpegxl::JxlSimpleEncoder::new(rgb, options).encode(&mut out) {
+            Ok(_) if !out.is_empty() => Some(out),
             Ok(_) => None,
             Err(error) => {
-                if let Some((mut child, _, _)) = self.child.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                if !self.warned {
-                    self.warned = true;
-                    tracing::warn!("trace views off until the sidecar works: {}: {error}", self.path.display());
-                }
+                tracing::warn!("trace view not kept: JPEG XL encode failed: {error:?}");
                 None
             }
         }
     }
 }
 
-impl Drop for Sidecar {
-    fn drop(&mut self) {
-        if let Some((mut child, stdin, _)) = self.child.take() {
-            drop(stdin); // EOF ends the sidecar's loop
-            let _ = child.wait();
-        }
-    }
-}
-
-/// A decoded view: the frame padded to even size for 4:2:0, and the 8x8 gray grid of the original.
+/// A decoded view: its RGB8 pixels, and the 8x8 gray grid a span's measure compares.
 struct Frame {
     width: u32,
     height: u32,
-    rgba: Vec<u8>,
+    rgb: Vec<u8>,
     thumb: Vec<u8>,
 }
 
 fn frame(png: &[u8]) -> Option<Frame> {
-    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
-    let (w, h) = img.dimensions();
-    if w < 2 || h < 2 {
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgb8();
+    let (width, height) = img.dimensions();
+    if width == 0 || height == 0 {
         return None;
     }
     let mut thumb = Vec::new();
     let mut y = 0;
-    while y + 8 <= h {
+    while y + 8 <= height {
         let mut x = 0;
-        while x + 8 <= w {
+        while x + 8 <= width {
             let p = img.get_pixel(x, y).0;
             thumb.push(((p[0] as u32 + 2 * p[1] as u32 + p[2] as u32) / 4) as u8);
             x += 8;
         }
         y += 8;
     }
-    let (pw, ph) = (w + (w & 1), h + (h & 1));
-    let mut rgba = vec![0u8; (pw * ph * 4) as usize];
-    let src = img.as_raw();
-    for row in 0..ph {
-        let from = row.min(h - 1) as usize * w as usize * 4; // repeat the edge row and column
-        let to = row as usize * pw as usize * 4;
-        rgba[to..to + w as usize * 4].copy_from_slice(&src[from..from + w as usize * 4]);
-        if pw != w {
-            let last = to + (w as usize - 1) * 4;
-            let (head, tail) = rgba.split_at_mut(last + 4);
-            tail[..4].copy_from_slice(&head[last..last + 4]);
-        }
-    }
-    Some(Frame { width: pw, height: ph, rgba, thumb })
+    Some(Frame { width, height, rgb: img.into_raw(), thumb })
 }
 
 struct Writer {
@@ -534,12 +484,32 @@ impl Writer {
         Ok(id)
     }
 
-    /// Stores a view as a PyroWave frame with its encoded extent; `None` when it does not decode or
-    /// encode, so no row points at a view that is not there.
+    /// The id of a Choice question, defining it and its options in order on first use. A store whose
+    /// question has other options keeps its definition; the gold insert then finds no matching label.
+    fn question(&mut self, name: &str, text: &str, options: &[&str]) -> rusqlite::Result<i64> {
+        if let Some(id) = self.vocab.get(&("question", name.to_string())) {
+            return Ok(*id);
+        }
+        self.conn
+            .execute("INSERT OR IGNORE INTO question (name, text) VALUES (?1, ?2)", params![name, text])?;
+        let id: i64 =
+            self.conn.query_row("SELECT question_id FROM question WHERE name = ?1", params![name], |r| r.get(0))?;
+        for (i, label) in options.iter().enumerate() {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO question_option VALUES (?1, ?2, ?3)",
+                params![id, i as i64, label],
+            )?;
+        }
+        self.vocab.insert(("question", name.to_string()), id);
+        Ok(id)
+    }
+
+    /// Stores a view as lossless JPEG XL with its extent; `None` when it does not decode or encode,
+    /// so no row points at a view that is not there.
     fn asset(&mut self, png: &[u8]) -> rusqlite::Result<Option<(i64, (u32, u32, Vec<u8>))>> {
         let Some(f) = frame(png) else { return Ok(None) };
-        let Some(packet) = self.encoder.encode(f.width, f.height, &f.rgba) else { return Ok(None) };
-        let kind = self.intern("asset_kind", "pyrowave")?;
+        let Some(packet) = self.encoder.encode(f.width, f.height, &f.rgb) else { return Ok(None) };
+        let kind = self.intern("asset_kind", "jxl")?;
         self.conn
             .execute("INSERT INTO asset (asset_kind_id, bytes) VALUES (?1, ?2)", params![kind, packet])?;
         let id = self.conn.last_insert_rowid();
@@ -579,20 +549,19 @@ impl Writer {
                     None => None,
                 } {
                     let task = self.intern("task_type", "agent_step")?;
-                    let dimension = self.intern("dimension", "instruction_following")?;
-                    let column = self.intern("input_column", "source_view")?;
+                    let role = self.intern("input_role", "view_before")?;
                     self.conn.execute(
-                        "INSERT OR IGNORE INTO maskscore_root VALUES (?1, ?2, ?3)",
-                        params![id, task, dimension],
+                        "INSERT OR IGNORE INTO decider_example VALUES (?1, ?2)",
+                        params![id, task],
                     )?;
                     self.conn.execute(
-                        "INSERT OR IGNORE INTO maskscore_input VALUES (?1, ?2, ?3)",
-                        params![id, column, asset],
+                        "INSERT OR IGNORE INTO decider_input VALUES (?1, ?2, ?3)",
+                        params![id, role, asset],
                     )?;
                     self.input_thumb.insert(id, thumb);
                 }
             }
-            Event::End { key, ok, at_ms, view } => {
+            Event::End { key, ok, at_ms, view, effect } => {
                 let Some(id) = self.spans.remove(&key) else {
                     return Ok(());
                 };
@@ -600,30 +569,46 @@ impl Writer {
                     "INSERT OR REPLACE INTO span_end VALUES (?1, ?2, ?3)",
                     params![id, iso_duration(at_ms), ok as i64],
                 )?;
-                let rooted: Option<i64> = self
+                let example: Option<i64> = self
                     .conn
-                    .query_row("SELECT span_id FROM maskscore_root WHERE span_id = ?1", params![id], |r| {
+                    .query_row("SELECT span_id FROM decider_example WHERE span_id = ?1", params![id], |r| {
                         r.get(0)
                     })
                     .optional()?;
                 let before = self.input_thumb.remove(&id);
-                let stored = match (view, rooted) {
-                    (Some(png), Some(_)) => self.asset(&png)?,
-                    _ => None,
+                if example.is_none() {
+                    return Ok(());
+                }
+                if let Some(effect) = effect {
+                    let question = self.question(EFFECT_QUESTION, EFFECT_TEXT, EFFECT_OPTIONS)?;
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO decider_question VALUES (?1, ?2)",
+                        params![id, question],
+                    )?;
+                    if let Some(label) = effect_gold(effect) {
+                        self.conn.execute(
+                            "INSERT OR REPLACE INTO decider_gold SELECT ?1, ?2, option_index \
+                             FROM question_option WHERE question_id = ?2 AND label = ?3",
+                            params![id, question, label],
+                        )?;
+                    }
+                }
+                let stored = match view {
+                    Some(png) => self.asset(&png)?,
+                    None => None,
                 };
                 if let Some((asset, after)) = stored {
-                    let axis = self.intern("candidate_axis", "view")?;
-                    let kind = self.intern("candidate_kind", "after_span")?;
+                    let role = self.intern("input_role", "view_after")?;
                     self.conn.execute(
-                        "INSERT OR IGNORE INTO maskscore_candidate VALUES (?1, ?2, 1, ?3, ?4)",
-                        params![id, axis, asset, kind],
+                        "INSERT OR IGNORE INTO decider_input VALUES (?1, ?2, ?3)",
+                        params![id, role, asset],
                     )?;
                     if let (Some((bw, bh, b)), (aw, ah, a)) = (before, after) {
                         if (bw, bh) == (aw, ah) && !a.is_empty() {
                             let metric = self.intern("metric", "gray_l1_8x8")?;
                             self.conn.execute(
-                                "INSERT OR REPLACE INTO maskscore_score VALUES (?1, ?2, 1, ?3, ?4)",
-                                params![id, axis, metric, gray_l1(&b, &a)],
+                                "INSERT OR REPLACE INTO decider_measure VALUES (?1, ?2, ?3)",
+                                params![id, metric, gray_l1(&b, &a)],
                             )?;
                         }
                     }
@@ -694,13 +679,12 @@ mod tests {
         out.into_inner()
     }
 
-    /// Stands in for the GPU: a "packet" that records the extent and the first pixel.
+    /// Stands in for the encoder: a "view" that records the extent and the first pixel.
     struct FakeEncoder;
     impl ViewEncoder for FakeEncoder {
-        fn encode(&mut self, w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
-            assert_eq!(rgba.len(), (w * h * 4) as usize);
-            assert!(w % 2 == 0 && h % 2 == 0, "4:2:0 needs even extents");
-            Some([&w.to_le_bytes()[..], &h.to_le_bytes()[..], &rgba[..4]].concat())
+        fn encode(&mut self, w: u32, h: u32, rgb: &[u8]) -> Option<Vec<u8>> {
+            assert_eq!(rgb.len(), (w * h * 3) as usize);
+            Some([&w.to_le_bytes()[..], &h.to_le_bytes()[..], &rgb[..3]].concat())
         }
     }
     struct FailingEncoder;
@@ -756,14 +740,25 @@ mod tests {
         assert_eq!(detail(&json!({})), "");
     }
 
+    use crate::action_record::ActionEffect;
+
+    fn gold(conn: &Connection) -> Vec<(String, String, Option<String>)> {
+        conn.prepare("SELECT question, options, gold FROM decider_row ORDER BY span_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
     #[test]
-    fn spans_nest_end_and_form_an_editscore_pair() {
+    fn spans_nest_end_and_form_a_decider_example() {
         let path = temp_db("pair");
         let store = open_with(&path, Box::new(FakeEncoder));
         let outer = store.begin("run_steps", &json!({}), None);
         let inner = store.begin("click", &json!({"pid": 1, "x": 3}), Some(png(64, 32, 10)));
-        store.end(inner, true, Some(png(64, 32, 200)));
-        store.end(outer, false, None);
+        store.end(inner, true, Some(png(64, 32, 200)), Some(ActionEffect::Confirmed));
+        store.end(outer, false, None, None);
         store.flush();
 
         let conn = Connection::open(&path).unwrap();
@@ -789,11 +784,26 @@ mod tests {
             .map(Result::unwrap)
             .collect();
         assert_eq!(ends, vec![0, 1]);
-        let instruction: String =
-            conn.query_row("SELECT instruction FROM editscore_pair", [], |r| r.get(0)).unwrap();
-        assert_eq!(instruction, r#"click {"pid":1,"x":3}"#);
-        let score: f64 = conn.query_row("SELECT metric_value FROM maskscore_score", [], |r| r.get(0)).unwrap();
-        // Views are PyroWave frames at the even-padded extent, never PNG.
+        let state: String = conn.query_row("SELECT DISTINCT state FROM decider_row", [], |r| r.get(0)).unwrap();
+        assert_eq!(state, r#"click {"pid":1,"x":3}"#);
+        assert_eq!(
+            gold(&conn),
+            vec![(
+                "effect".to_string(),
+                r#"["confirmed","partial","suspected_noop","refused"]"#.to_string(),
+                Some("confirmed".to_string())
+            )]
+        );
+        let roles: Vec<String> = conn
+            .prepare("SELECT r.name FROM decider_input JOIN input_role r USING (input_role_id) ORDER BY r.name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(roles, vec!["view_after".to_string(), "view_before".to_string()]);
+        let score: f64 = conn.query_row("SELECT value FROM decider_measure", [], |r| r.get(0)).unwrap();
+        // Views are JPEG XL, never PNG.
         let kinds: Vec<String> = conn
             .prepare("SELECT DISTINCT k.name FROM asset JOIN asset_kind k USING (asset_kind_id)")
             .unwrap()
@@ -801,11 +811,12 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert_eq!(kinds, vec!["pyrowave".to_string()]);
+        assert_eq!(kinds, vec!["jxl".to_string()]);
         assert!((score - 190.0 / 255.0).abs() < 1e-9, "score {score}");
         // The ETNF rule XR Pilot checks: no column anywhere holds a NULL.
-        for table in ["span", "span_detail", "span_parent", "span_end", "asset", "asset_extent", "maskscore_root",
-            "maskscore_input", "maskscore_candidate", "maskscore_score"] {
+        for table in ["span", "span_detail", "span_parent", "span_end", "asset", "asset_extent", "question",
+            "question_option", "decider_example", "decider_input", "decider_question", "decider_gold",
+            "decider_measure"] {
             let cols: Vec<String> = conn
                 .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
                 .unwrap()
@@ -822,27 +833,59 @@ mod tests {
     }
 
     #[test]
-    fn odd_windows_are_padded_and_a_failed_encode_keeps_no_view() {
+    fn an_unverifiable_effect_asks_the_question_and_keeps_no_gold() {
+        let path = temp_db("unverifiable");
+        let store = open_with(&path, Box::new(FakeEncoder));
+        let s = store.begin("click", &json!({"pid": 1}), Some(png(64, 32, 10)));
+        store.end(s, true, Some(png(64, 32, 10)), Some(ActionEffect::Unverifiable));
+        // A control: the same call with a measured effect does get its gold.
+        let c = store.begin("click", &json!({"pid": 2}), Some(png(64, 32, 10)));
+        store.end(c, true, Some(png(64, 32, 10)), Some(ActionEffect::SuspectedNoop));
+        // A tool with no action record asks no question.
+        let n = store.begin("get_window_state", &json!({"pid": 3}), Some(png(64, 32, 10)));
+        store.end(n, true, Some(png(64, 32, 10)), None);
+        store.flush();
+        let conn = Connection::open(&path).unwrap();
+        let rows = gold(&conn);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].2, None);
+        assert_eq!(rows[1].2.as_deref(), Some("suspected_noop"));
+        let golds: i64 = conn.query_row("SELECT count(*) FROM decider_gold", [], |r| r.get(0)).unwrap();
+        assert_eq!(golds, 1);
+        let examples: i64 = conn.query_row("SELECT count(*) FROM decider_example", [], |r| r.get(0)).unwrap();
+        assert_eq!(examples, 3);
+    }
+
+    #[test]
+    fn every_effect_but_unverifiable_is_an_option() {
+        for e in [ActionEffect::Confirmed, ActionEffect::Partial, ActionEffect::SuspectedNoop, ActionEffect::Refused] {
+            assert!(EFFECT_OPTIONS.contains(&effect_gold(e).unwrap()), "{e:?}");
+        }
+        assert_eq!(effect_gold(ActionEffect::Unverifiable), None);
+    }
+
+    #[test]
+    fn odd_windows_keep_their_size_and_a_failed_encode_keeps_no_view() {
         let path = temp_db("odd");
         let store = open_with(&path, Box::new(FakeEncoder));
         let s = store.begin("click", &json!({"pid": 1}), Some(png(673, 439, 50)));
-        store.end(s, true, Some(png(673, 439, 60)));
+        store.end(s, true, Some(png(673, 439, 60)), None);
         store.flush();
         let conn = Connection::open(&path).unwrap();
         let extent: (i64, i64) =
             conn.query_row("SELECT width, height FROM asset_extent LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!(extent, (674, 440));
+        assert_eq!(extent, (673, 439));
 
         // A control: the same calls with an encoder that fails leave plain spans and no assets.
         let path = temp_db("fail");
         let store = open_with(&path, Box::new(FailingEncoder));
         let s = store.begin("click", &json!({"pid": 1}), Some(png(64, 32, 10)));
-        store.end(s, true, Some(png(64, 32, 200)));
+        store.end(s, true, Some(png(64, 32, 200)), None);
         store.flush();
         let conn = Connection::open(&path).unwrap();
         let counts: (i64, i64, i64) = conn
             .query_row(
-                "SELECT (SELECT count(*) FROM asset), (SELECT count(*) FROM maskscore_root), (SELECT count(*) FROM span_end)",
+                "SELECT (SELECT count(*) FROM asset), (SELECT count(*) FROM decider_example), (SELECT count(*) FROM span_end)",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -850,15 +893,66 @@ mod tests {
         assert_eq!(counts, (0, 0, 1));
     }
 
+    /// The pixels of an image that is not flat: every pixel differs from its neighbours.
+    fn noise_png(w: u32, h: u32) -> (Vec<u8>, Vec<u8>) {
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            let v = x.wrapping_mul(2654435761).wrapping_add(y.wrapping_mul(40503));
+            image::Rgb([v as u8, (v >> 8) as u8, (v >> 16) as u8])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        (out.into_inner(), img.into_raw())
+    }
+
+    fn jxl_decode(bytes: &[u8]) -> (u32, u32, String, Vec<u8>) {
+        let image = jxl_oxide::JxlImage::builder().read(std::io::Cursor::new(bytes)).unwrap();
+        let colour = format!("{:?}", image.image_header().metadata.colour_encoding);
+        let (w, h) = (image.width(), image.height());
+        let frame = image.render_frame(0).unwrap();
+        let rgb = frame.image_all_channels().buf().iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8).collect();
+        (w, h, colour, rgb)
+    }
+
     #[test]
-    fn a_span_without_a_view_has_no_maskscore_row() {
+    fn a_stored_view_decodes_to_the_same_pixels_tagged_srgb() {
+        let path = temp_db("jxl");
+        let store = open_with(&path, Box::new(Jxl));
+        let (before, before_rgb) = noise_png(673, 439);
+        let (after, _) = noise_png(673, 439);
+        let s = store.begin("click", &json!({"pid": 1}), Some(before));
+        store.end(s, true, Some(after), None);
+        store.flush();
+        let conn = Connection::open(&path).unwrap();
+        let bytes: Vec<u8> = conn
+            .query_row(
+                "SELECT a.bytes FROM decider_input i JOIN input_role r USING (input_role_id) \
+                 JOIN asset a ON a.asset_id = i.asset_id WHERE r.name = 'view_before'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // A JPEG XL bare codestream starts with FF 0A (ISO/IEC 18181-1).
+        assert_eq!(&bytes[..2], &[0xff, 0x0a]);
+        let (w, h, colour, rgb) = jxl_decode(&bytes);
+        assert_eq!((w, h), (673, 439));
+        assert!(colour.contains("primaries: Srgb") && colour.contains("tf: Srgb"), "{colour}");
+        assert_eq!(rgb.len(), before_rgb.len());
+        assert!(rgb == before_rgb, "lossless: every pixel comes back");
+        // A control: one changed bit is seen, so the equality above can fail.
+        let mut other = before_rgb.clone();
+        other[1000] ^= 1;
+        assert!(rgb != other);
+    }
+
+    #[test]
+    fn a_span_without_a_view_is_not_a_decider_example() {
         let path = temp_db("noview");
         let store = open_with(&path, Box::new(FakeEncoder));
         let s = store.begin("list_windows", &json!({}), None);
-        store.end(s, true, None);
+        store.end(s, true, None, None);
         store.flush();
         let conn = Connection::open(&path).unwrap();
-        let roots: i64 = conn.query_row("SELECT count(*) FROM maskscore_root", [], |r| r.get(0)).unwrap();
+        let roots: i64 = conn.query_row("SELECT count(*) FROM decider_example", [], |r| r.get(0)).unwrap();
         assert_eq!(roots, 0);
         let details: i64 = conn.query_row("SELECT count(*) FROM span_detail", [], |r| r.get(0)).unwrap();
         assert_eq!(details, 0, "empty arguments are a missing row, not an empty string");
@@ -870,9 +964,9 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         {
             let c = Connection::open(&path).unwrap();
-            c.execute_batch("CREATE TABLE old (x); PRAGMA user_version = 2;").unwrap();
+            c.execute_batch("CREATE TABLE old (x); PRAGMA user_version = 3;").unwrap();
         }
         let _store = TraceStore::open(&path).unwrap();
-        assert!(PathBuf::from(format!("{}.v2", path.display())).exists());
+        assert!(PathBuf::from(format!("{}.v3", path.display())).exists());
     }
 }
