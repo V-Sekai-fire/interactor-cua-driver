@@ -1485,7 +1485,7 @@ mod tests {
 
         with_isolated_home(|home| {
             // Write a config that disables the check.
-            let cfg_dir = home.join(".cua-driver");
+            let cfg_dir = home.join(".cua-tracer");
             std::fs::create_dir_all(&cfg_dir).unwrap();
             std::fs::write(
                 cfg_dir.join("config.json"),
@@ -1529,7 +1529,7 @@ mod tests {
             );
 
             // Case B: config file present but flag = true → still enabled.
-            let cfg_dir = home.join(".cua-driver");
+            let cfg_dir = home.join(".cua-tracer");
             std::fs::create_dir_all(&cfg_dir).unwrap();
             std::fs::write(
                 cfg_dir.join("config.json"),

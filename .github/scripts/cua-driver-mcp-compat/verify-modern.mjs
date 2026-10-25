@@ -136,7 +136,7 @@ class ObservedTransport extends StdioClientTransport {
         assert.equal(message.result.resultType, 'complete');
         assert.equal(
           message.result._meta?.['io.modelcontextprotocol/serverInfo']?.name,
-          'cua-driver'
+          'cua-tracer'
         );
         if (method === 'server/discover' || method.endsWith('/list') || method.endsWith('/read')) {
           assert.equal(message.result.ttlMs, 0);

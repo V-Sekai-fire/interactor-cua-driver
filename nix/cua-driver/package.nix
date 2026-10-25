@@ -102,7 +102,7 @@ pkgs.rustPlatform.buildRustPackage {
     description = "Cross-platform MCP server for computer-use automation";
     homepage = "https://github.com/trycua/cua";
     license = licenses.mit;
-    mainProgram = "cua-driver";
+    mainProgram = "cua-tracer";
     platforms = platforms.linux;
   };
 }

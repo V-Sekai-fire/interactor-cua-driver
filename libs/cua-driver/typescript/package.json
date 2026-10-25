@@ -57,7 +57,7 @@
   "devDependencies": {
     "@trycua/fleet": "0.1.2",
     "@types/node": "^22.0.0",
-    "electron": "43.7.6",
+    "electron": "43.8.3",
     "typescript": "^5.7.0",
     "uniffi-bindgen-react-native": "0.31.0-3"
   },

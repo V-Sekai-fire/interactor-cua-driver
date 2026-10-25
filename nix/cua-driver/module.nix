@@ -41,7 +41,7 @@ in
     services.dbus.enable = true;
 
     environment.variables = {
-      CUA_DRIVER_BIN = "${cfg.package}/bin/cua-driver";
+      CUA_DRIVER_BIN = "${cfg.package}/bin/cua-tracer";
     };
   };
 }
